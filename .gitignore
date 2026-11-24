@@ -1,0 +1,11 @@
+# Build output
+/src-tauri/target/
+/src-tauri/gen/schemas/
+/dist/
+
+# Reverse-engineering artifacts: third-party Krisp binaries, not ours to publish
+/artifacts/
+
+# Tooling
+node_modules/
+*.log

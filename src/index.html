@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Kriuk</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="panel" id="panel">
+    <header class="header" data-tauri-drag-region>
+      <div class="brand" aria-label="kriuk">
+        <svg class="logo" viewBox="0 0 30 26" aria-hidden="true">
+          <rect x="0"  y="9"  width="3" height="8"  rx="1.5" />
+          <rect x="6"  y="5"  width="3" height="16" rx="1.5" />
+          <rect x="12" y="1"  width="3" height="24" rx="1.5" />
+          <rect x="18" y="6"  width="3" height="14" rx="1.5" />
+          <rect x="24" y="10" width="3" height="6"  rx="1.5" />
+        </svg>
+        <span class="wordmark">kriuk<span class="dot">.</span></span>
+      </div>
+      <div class="header-actions">
+        <span class="badge" data-i18n="badge">Personal</span>
+        <button class="icon-btn" id="minimize" title="Hide" aria-label="Hide" data-i18n-aria="hide">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10" /></svg>
+        </button>
+      </div>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab is-active" data-tab="audio" role="tab" aria-selected="true">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <rect x="2"  y="7" width="1.8" height="6" rx="0.9"/>
+          <rect x="6"  y="4" width="1.8" height="12" rx="0.9"/>
+          <rect x="10" y="2" width="1.8" height="16" rx="0.9"/>
+          <rect x="14" y="5" width="1.8" height="10" rx="0.9"/>
+        </svg>
+        <span data-i18n="tab_audio">Audio</span>
+      </button>
+      <button class="tab" data-tab="activity" role="tab" aria-selected="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M2 11h3l2.2-5 3 10 2.6-7 1.6 2H18" />
+        </svg>
+        <span data-i18n="tab_activity">Activity</span>
+      </button>
+      <button class="tab" data-tab="settings" role="tab" aria-selected="false">
+        <svg viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r="3" />
+          <path d="M10 2.4v2M10 15.6v2M2.4 10h2M15.6 10h2M4.6 4.6l1.4 1.4M14 14l1.4 1.4M15.4 4.6L14 6M6 14l-1.4 1.4" />
+        </svg>
+        <span data-i18n="tab_settings">Settings</span>
+      </button>
+    </nav>
+
+    <!-- ============ AUDIO ============ -->
+    <section class="view is-active" id="view-audio">
+      <div class="banner" id="banner">
+        <span class="banner-check">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.4l3 3 6-6.4" /></svg>
+        </span>
+        <div class="banner-text">
+          <strong id="banner-title">Your quiet room is ready.</strong>
+          <span id="banner-sub">Focus on the conversation, not the noise.</span>
+        </div>
+      </div>
+
+      <div class="row">
+        <span class="tile tile-peach">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <rect x="7.5" y="2" width="5" height="9" rx="2.5" />
+            <path d="M4.5 9.5a5.5 5.5 0 0011 0M10 15v3" />
+          </svg>
+        </span>
+        <div class="row-text">
+          <strong data-i18n="mic">Microphone</strong>
+          <span id="mic-sub">Noise cancellation on</span>
+        </div>
+        <button class="toggle is-on" id="mic-toggle" role="switch" aria-checked="true" aria-label="Mic noise cancellation" data-i18n-aria="mic_aria"><span></span></button>
+      </div>
+
+      <label class="select">
+        <select id="mic-device" aria-label="Microphone" data-i18n-aria="mic">
+          <option value="" data-i18n="mic_default">Default microphone (System)</option>
+        </select>
+        <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5L8 10.5l4-4" /></svg>
+      </label>
+
+      <div class="label-row">
+        <span data-i18n="reduction">Reduction</span>
+        <button class="link" id="reduction-label">Balanced</button>
+      </div>
+
+      <div class="segmented" id="reduction" role="group" aria-label="Reduction level">
+        <button data-value="ringan">Light</button>
+        <button data-value="seimbang" class="is-active">Balanced</button>
+        <button data-value="maksimal">Maximum</button>
+      </div>
+
+      <div class="label-row">
+        <span data-i18n="eq">Equalizer</span>
+        <button class="link" id="eq-label">Neutral</button>
+      </div>
+
+      <div class="segmented is-four" id="eq-presets" role="group" aria-label="Equalizer preset">
+        <button data-value="netral" class="is-active">Neutral</button>
+        <button data-value="jelas">Clear</button>
+        <button data-value="hangat">Warm</button>
+        <button data-value="auto">Auto</button>
+      </div>
+
+      <div class="row row-tight">
+        <span class="row-ico">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M10 2.6l6 2.4v5c0 3.6-2.5 6.4-6 7.4-3.5-1-6-3.8-6-7.4v-5z" />
+          </svg>
+        </span>
+        <div class="row-text">
+          <strong data-i18n="echo">Echo cancellation</strong>
+          <span id="echo-sub">Off</span>
+        </div>
+        <button class="toggle" id="echo-toggle" role="switch" aria-checked="false" aria-label="Echo cancellation"><span></span></button>
+      </div>
+
+      <div class="divider"></div>
+
+      <div class="row">
+        <span class="tile tile-peri">
+          <svg viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M3 8v4h3l4 3.2V4.8L6 8z" />
+            <path d="M13.2 7.2a4 4 0 010 5.6" />
+          </svg>
+        </span>
+        <div class="row-text">
+          <strong data-i18n="send">Send result to</strong>
+          <span id="spk-sub">Off</span>
+        </div>
+        <button class="toggle" id="spk-toggle" role="switch" aria-checked="false" aria-label="Play processed audio on an output device"><span></span></button>
+      </div>
+
+      <label class="select">
+        <select id="spk-device" aria-label="Output device">
+          <option value="" data-i18n="spk_default">Default speaker (System)</option>
+        </select>
+        <svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6.5L8 10.5l4-4" /></svg>
+      </label>
+
+      <div class="meter-card">
+        <div class="meter-top">
+          <span class="meter-ico">
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <rect x="7.5" y="2.5" width="5" height="8" rx="2.5" />
+              <path d="M5 9.5a5 5 0 0010 0M10 14.5V17" />
+            </svg>
+          </span>
+          <div class="meter" id="meter" aria-hidden="true"></div>
+          <button class="btn" id="mic-test">Test mic</button>
+        </div>
+        <p class="meter-note"><span data-i18n="test_note">Check your level ·</span> <span id="meter-state">Not recording</span></p>
+      </div>
+    </section>
+
+    <!-- ============ ACTIVITY ============ -->
+    <section class="view" id="view-activity">
+      <h2 class="view-title" data-i18n="activity_title">This session</h2>
+      <p class="view-sub" data-i18n="activity_sub">Temporary test history, no audio stored.</p>
+
+      <div class="empty" id="activity-empty">
+        <svg class="empty-ico" viewBox="0 0 40 24" aria-hidden="true">
+          <path d="M1 13h5l3-8 4 16 4-12 3 6 3-3h5" />
+        </svg>
+        <p data-i18n="activity_empty">No mic tests yet.</p>
+        <button class="btn btn-wide" id="goto-audio" data-i18n="activity_goto">Open audio controls</button>
+      </div>
+
+      <ul class="activity-list" id="activity-list"></ul>
+    </section>
+
+    <!-- ============ SETTINGS ============ -->
+    <section class="view" id="view-settings">
+      <h2 class="view-title" data-i18n="settings_title">Kriuk preferences</h2>
+
+      <div class="row row-plain">
+        <div class="row-text">
+          <strong data-i18n="focus">Automatic focus mode</strong>
+          <span data-i18n="focus_sub">Simulated for this session.</span>
+        </div>
+        <button class="toggle is-on" id="focus-toggle" role="switch" aria-checked="true" aria-label="Automatic focus mode"><span></span></button>
+      </div>
+
+      <div class="label-row">
+        <span data-i18n="language">Language</span>
+      </div>
+      <div class="segmented is-two" id="lang" role="group" aria-label="Language">
+        <button data-value="en" class="is-active">English</button>
+        <button data-value="id">Bahasa Indonesia</button>
+      </div>
+
+      <div class="label-row">
+        <span data-i18n="theme">Appearance</span>
+      </div>
+      <div class="segmented is-two" id="theme" role="group" aria-label="Appearance">
+        <button data-value="light" class="is-active" data-i18n="theme_light">Light</button>
+        <button data-value="dark" data-i18n="theme_dark">Dark</button>
+      </div>
+
+      <div class="about">
+        <strong data-i18n="about_title">About Kriuk</strong>
+        <p data-i18n-html="about_body">Everything runs on your device: echo cancellation, RNNoise 48 kHz, then the equalizer. Turn on <em>Send result to</em> to play the result on a speaker — or a virtual audio cable, so other apps get the cleaned sound.</p>
+      </div>
+
+      <p class="hint" data-i18n="hint">Click outside the panel or press Escape to hide it. Click the Kriuk tray icon to bring it back.</p>
+    </section>
+
+    <footer class="footer">
+      <span class="footer-left">
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M8 1.8l5 2v4.1c0 3-2.1 5.3-5 6.1-2.9-.8-5-3.1-5-6.1V3.8z" />
+        </svg>
+        <span data-i18n="footer_privacy">On-device privacy</span>
+      </span>
+      <span class="footer-right" data-i18n="footer_local">Local preview</span>
+    </footer>
+  </main>
+
+  <span class="caret" aria-hidden="true"></span>
+
+  <script src="app.js"></script>
+</body>
+</html>

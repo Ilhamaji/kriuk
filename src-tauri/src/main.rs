@@ -2,8 +2,11 @@
 
 mod aec;
 mod eq;
+mod settings;
+mod ui;
 
 use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -13,13 +16,21 @@ use std::time::{Duration, Instant};
 use aec::EchoCanceller;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, Sample, SampleFormat, SizedSample};
+use glutin::config::Config as GlConfig;
+use glutin::context::PossiblyCurrentContext;
+use glutin::display::GetGlDisplay;
+use glutin::prelude::*;
+use glutin::surface::{Surface, WindowSurface};
 use nnnoiseless::DenoiseState;
-use tauri::{
-    image::Image,
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, WebviewWindow,
-};
+use raw_window_handle::HasWindowHandle;
+use tray_icon::menu::{Menu, MenuEvent, MenuItem};
+use tray_icon::{TrayIcon, TrayIconBuilder, TrayIconEvent};
+use winit::application::ApplicationHandler;
+use winit::dpi::{LogicalSize, PhysicalPosition};
+use winit::event::WindowEvent;
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
+use winit::platform::windows::WindowAttributesExtWindows;
+use winit::window::{Window, WindowId, WindowLevel};
 
 const GAP: i32 = 10;
 /// Blur right after showing is Windows handing focus back; ignore it.
@@ -30,9 +41,9 @@ const FRAME: usize = 480; // 10 ms, DenoiseState::FRAME_SIZE
 const QUEUE: usize = 4_800; // 100 ms of monitor audio
 
 static METER_RUNNING: AtomicBool = AtomicBool::new(false);
-/// 0 = ringan, 1 = seimbang, 2 = maksimal. Wet mix read by the audio callback.
+/// 0 = light, 1 = balanced, 2 = maximum. Wet mix read by the audio callback.
 static REDUCTION: AtomicU8 = AtomicU8::new(1);
-/// Denoiser on/off, mirrors the Mikrofon toggle.
+/// Denoiser on/off, mirrors the Microphone toggle.
 static DENOISE: AtomicBool = AtomicBool::new(true);
 /// Monitor playback is toggled live; the output stream is only built while it is on.
 static MONITOR_ON: AtomicBool = AtomicBool::new(false);
@@ -46,13 +57,93 @@ static EQ_PRESET: AtomicU8 = AtomicU8::new(0);
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 /// UI language for the strings Rust owns: tray menu and tooltip.
 static LANG_ID: AtomicBool = AtomicBool::new(false);
+/// True while the popover exists, so the audio thread only wakes a visible UI.
+static PANEL_OPEN: AtomicBool = AtomicBool::new(false);
 
-struct TrayLabels {
-    open: MenuItem<tauri::Wry>,
-    quit: MenuItem<tauri::Wry>,
+pub type Shared = Arc<Mutex<State>>;
+
+/// Everything the panel draws. Written by the audio thread and by the UI, so it
+/// is the single place both sides look at.
+pub struct State {
+    pub devices: Vec<String>,
+    pub outputs: Vec<String>,
+    pub mic: Option<String>,
+    pub spk: Option<String>,
+    pub spk_on: bool,
+    pub aec_on: bool,
+    pub denoise: bool,
+    pub reduction: u8,
+    pub eq: u8,
+    pub lang_id: bool,
+    pub dark: bool,
+    pub dark_set: bool,
+    pub close_to_tray: bool,
+    pub autostart: bool,
+    pub listening: bool,
+    pub level: f32,
+    pub peak: f32,
+    pub notice: Option<&'static str>,
+    pub err: Option<String>,
+    pub tab: u8,
+    pub tests: Vec<f32>,
+    /// Which dropdown is open; a native panel has to track it itself.
+    pub open: Option<u8>,
 }
 
-type ShownAt = Arc<Mutex<Instant>>;
+impl State {
+    fn from_saved(saved: settings::Saved, dark: bool) -> Self {
+        Self {
+            devices: Vec::new(),
+            outputs: Vec::new(),
+            mic: saved.mic,
+            spk: saved.spk,
+            spk_on: false,
+            aec_on: saved.aec_on,
+            denoise: saved.denoise,
+            reduction: saved.reduction.min(2),
+            eq: saved.eq.min(eq::AUTO),
+            lang_id: saved.lang_id,
+            dark,
+            dark_set: saved.dark.is_some(),
+            close_to_tray: saved.close_to_tray,
+            autostart: false,
+            listening: false,
+            level: 0.0,
+            peak: 0.0,
+            notice: None,
+            err: None,
+            tab: 0,
+            tests: Vec::new(),
+            open: None,
+        }
+    }
+
+    fn saved(&self) -> settings::Saved {
+        settings::Saved {
+            chain: self.listening,
+            mic: self.mic.clone(),
+            spk: self.spk.clone(),
+            spk_on: self.spk_on,
+            aec_on: self.aec_on,
+            denoise: self.denoise,
+            reduction: self.reduction,
+            eq: self.eq,
+            lang_id: self.lang_id,
+            dark: if self.dark_set { Some(self.dark) } else { None },
+            close_to_tray: self.close_to_tray,
+        }
+    }
+}
+
+enum UserEvent {
+    Wake,
+    TrayClick,
+    Menu(String),
+}
+
+fn wake(proxy: &EventLoopProxy<UserEvent>) {
+    let _ = proxy.send_event(UserEvent::Wake);
+}
 
 fn wet_mix(level: u8) -> f32 {
     match level {
@@ -62,50 +153,6 @@ fn wet_mix(level: u8) -> f32 {
     }
 }
 
-fn place(win: &WebviewWindow) {
-    let size = match win.outer_size() {
-        Ok(s) => s,
-        Err(_) => return,
-    };
-    let monitor = match win.current_monitor() {
-        Ok(Some(m)) => m,
-        _ => return,
-    };
-    let area = monitor.work_area();
-    let x = area.position.x + area.size.width as i32 - size.width as i32 - GAP;
-    let y = area.position.y + area.size.height as i32 - size.height as i32 - GAP;
-    let _ = win.set_position(PhysicalPosition::new(x, y));
-}
-
-fn show_popover(win: &WebviewWindow, shown: &ShownAt) {
-    place(win);
-    *shown.lock().unwrap() = Instant::now();
-    let _ = win.show();
-    let _ = win.set_focus();
-    // Lets the UI re-enumerate audio devices: Windows only reports new ones on request.
-    let _ = win.app_handle().emit("kriuk://shown", ());
-}
-
-fn toggle(win: &WebviewWindow, shown: &ShownAt) {
-    if win.is_visible().unwrap_or(false) {
-        // Hiding is not stopping: the chain keeps running in the tray.
-        let _ = win.hide();
-        return;
-    }
-    show_popover(win, shown);
-}
-
-#[tauri::command]
-fn hide_window(win: WebviewWindow) {
-    let _ = win.hide();
-}
-
-#[tauri::command]
-fn quit_app(app: AppHandle) {
-    app.exit(0);
-}
-
-#[tauri::command]
 fn list_devices() -> Vec<String> {
     let host = cpal::default_host();
     match host.input_devices() {
@@ -114,37 +161,6 @@ fn list_devices() -> Vec<String> {
     }
 }
 
-#[tauri::command]
-fn set_reduction(level: u8) {
-    REDUCTION.store(level.min(2), Ordering::Relaxed);
-}
-
-#[tauri::command]
-fn set_denoise(on: bool) {
-    DENOISE.store(on, Ordering::Relaxed);
-}
-
-#[tauri::command]
-fn set_monitor(on: bool) {
-    MONITOR_ON.store(on, Ordering::Relaxed);
-}
-
-#[tauri::command]
-fn set_aec(on: bool) {
-    AEC_ON.store(on, Ordering::Relaxed);
-}
-
-#[tauri::command]
-fn set_eq(preset: u8) {
-    EQ_PRESET.store(preset.min(eq::AUTO), Ordering::Relaxed);
-}
-
-#[tauri::command]
-fn set_output(device: Option<String>) {
-    *MONITOR_DEVICE.lock().unwrap() = device.filter(|d| !d.is_empty());
-}
-
-#[tauri::command]
 fn list_outputs() -> Vec<String> {
     let host = cpal::default_host();
     match host.output_devices() {
@@ -153,68 +169,54 @@ fn list_outputs() -> Vec<String> {
     }
 }
 
-#[tauri::command]
-fn start_meter(app: AppHandle, device: Option<String>) {
-    if METER_RUNNING.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    set_tray_status(&app);
+/// WASAPI enumeration can take seconds, so it runs off the UI thread and the panel
+/// redraws when the answer lands.
+fn refresh_devices(shared: Shared, proxy: EventLoopProxy<UserEvent>) {
     std::thread::spawn(move || {
-        if let Err(err) = run_meter(&app, device.as_deref()) {
-            let _ = app.emit("kriuk://meter-error", err);
+        let devices = list_devices();
+        let outputs = list_outputs();
+        {
+            let mut st = shared.lock().unwrap();
+            st.devices = devices;
+            st.outputs = outputs;
         }
-        MONITOR_ON.store(false, Ordering::Relaxed);
-        METER_RUNNING.store(false, Ordering::SeqCst);
-        set_tray_status(&app);
+        wake(&proxy);
     });
 }
 
-#[tauri::command]
-fn stop_meter() {
-    METER_RUNNING.store(false, Ordering::SeqCst);
-}
-
-#[tauri::command]
-fn meter_active() -> bool {
-    METER_RUNNING.load(Ordering::SeqCst)
-}
-
-#[tauri::command]
-fn set_close_to_tray(on: bool) {
-    CLOSE_TO_TRAY.store(on, Ordering::Relaxed);
-}
-
-/// The tray tooltip is the only sign that the chain is live while the popover is hidden.
-fn set_tray_status(app: &AppHandle) {
-    if let Some(tray) = app.tray_by_id("kriuk") {
-        let listening = METER_RUNNING.load(Ordering::SeqCst);
-        let indonesian = LANG_ID.load(Ordering::Relaxed);
-        let text = match (listening, indonesian) {
-            (true, true) => "Kriuk — mendengarkan",
-            (true, false) => "Kriuk — listening",
-            _ => "Kriuk",
-        };
-        let _ = tray.set_tooltip(Some(text));
+fn start_meter(shared: Shared, proxy: EventLoopProxy<UserEvent>, device: Option<String>) {
+    if METER_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
     }
-}
-
-/// The webview owns the language choice, so it pushes it here for the tray strings.
-#[tauri::command]
-fn set_language(app: AppHandle, lang: String) {
-    let indonesian = lang == "id";
-    LANG_ID.store(indonesian, Ordering::Relaxed);
-    if let Some(labels) = app.try_state::<TrayLabels>() {
-        let _ = labels.open.set_text(if indonesian { "Buka Kriuk" } else { "Open Kriuk" });
-        let _ = labels.quit.set_text(if indonesian { "Keluar" } else { "Quit" });
+    {
+        let mut st = shared.lock().unwrap();
+        st.listening = true;
+        st.err = None;
+        st.notice = None;
+        st.peak = 0.0;
     }
-    set_tray_status(&app);
+    wake(&proxy);
+    std::thread::spawn(move || {
+        if let Err(err) = run_meter(shared.clone(), proxy.clone(), device.as_deref()) {
+            let mut st = shared.lock().unwrap();
+            st.err = Some(err);
+        }
+        MONITOR_ON.store(false, Ordering::Relaxed);
+        METER_RUNNING.store(false, Ordering::SeqCst);
+        {
+            let mut st = shared.lock().unwrap();
+            st.listening = false;
+            st.spk_on = false;
+            st.level = 0.0;
+        }
+        wake(&proxy);
+    });
 }
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "Kriuk";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[tauri::command]
 fn get_autostart() -> bool {
     Command::new("reg")
         .args(["query", RUN_KEY, "/v", RUN_VALUE])
@@ -224,7 +226,6 @@ fn get_autostart() -> bool {
         .unwrap_or(false)
 }
 
-#[tauri::command]
 fn set_autostart(on: bool) -> Result<(), String> {
     let mut cmd = Command::new("reg");
     if on {
@@ -317,7 +318,11 @@ fn plays_in_your_ear(name: &str) -> bool {
     ["headset", "headphone", "earphone"].iter().any(|k| name.contains(k))
 }
 
-fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
+fn run_meter(
+    shared: Shared,
+    proxy: EventLoopProxy<UserEvent>,
+    wanted: Option<&str>,
+) -> Result<(), String> {
     let host = cpal::default_host();
     let device = pick_device(&host, wanted)?;
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
@@ -339,13 +344,28 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
 
     let stream = match supported.sample_format() {
         SampleFormat::F32 => capture::<f32>(
-            &device, &config, channels, level.clone(), queue.clone(), reference.clone(),
+            &device,
+            &config,
+            channels,
+            level.clone(),
+            queue.clone(),
+            reference.clone(),
         ),
         SampleFormat::I16 => capture::<i16>(
-            &device, &config, channels, level.clone(), queue.clone(), reference.clone(),
+            &device,
+            &config,
+            channels,
+            level.clone(),
+            queue.clone(),
+            reference.clone(),
         ),
         SampleFormat::U16 => capture::<u16>(
-            &device, &config, channels, level.clone(), queue.clone(), reference.clone(),
+            &device,
+            &config,
+            channels,
+            level.clone(),
+            queue.clone(),
+            reference.clone(),
         ),
         other => return Err(format!("unsupported sample format: {other:?}")),
     }
@@ -364,7 +384,7 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
         // The loopback stream only exists while echo cancellation is on.
         if AEC_ON.load(Ordering::Relaxed) {
             if loopback.is_none() {
-                loopback = Some(spawn_loopback(app.clone(), reference.clone()));
+                loopback = Some(spawn_loopback(shared.clone(), proxy.clone(), reference.clone()));
             }
         } else if loopback.take().is_some() {
             reference.lock().unwrap().clear();
@@ -385,7 +405,8 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
         let live = monitor.is_some();
         if live != reported {
             reported = live;
-            let _ = app.emit("kriuk://monitor", live);
+            shared.lock().unwrap().spk_on = live;
+            wake(&proxy);
         }
 
         // Same box for the mic and the monitor: the speaker sits inches from the
@@ -401,10 +422,11 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
                     && !plays_in_your_ear(out)
                     && MONITOR_ON.swap(false, Ordering::Relaxed)
                 {
-                    let _ = app.emit(
-                        "kriuk://monitor-error",
-                        "the microphone is on this output, so it hears itself",
-                    );
+                    let mut st = shared.lock().unwrap();
+                    st.notice = Some("same_box");
+                    st.spk_on = false;
+                    drop(st);
+                    wake(&proxy);
                 }
             }
         }
@@ -413,10 +435,11 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
         // output, so refuse the pair instead of eating the voice.
         if live && monitor_is_reference(&host, monitor_target.as_deref()) {
             if AEC_ON.swap(false, Ordering::Relaxed) {
-                let _ = app.emit(
-                    "kriuk://aec-error",
-                    "echo cancellation needs the processed audio on a different device",
-                );
+                let mut st = shared.lock().unwrap();
+                st.notice = Some("aec_same");
+                st.aec_on = false;
+                drop(st);
+                wake(&proxy);
             }
         }
 
@@ -427,7 +450,16 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
             *slot = 0.0;
             v
         };
-        let _ = app.emit("kriuk://level", value);
+        {
+            let mut st = shared.lock().unwrap();
+            st.level = value;
+            if value > st.peak {
+                st.peak = value;
+            }
+        }
+        if PANEL_OPEN.load(Ordering::Relaxed) {
+            wake(&proxy);
+        }
     }
     Ok(())
 }
@@ -593,11 +625,20 @@ fn build_monitor(
 const REF_QUEUE: usize = 960;
 const _: () = assert!(FRAME == aec::BLOCK);
 
-fn spawn_loopback(app: AppHandle, queue: Arc<Mutex<VecDeque<f32>>>) -> std::thread::JoinHandle<()> {
+fn spawn_loopback(
+    shared: Shared,
+    proxy: EventLoopProxy<UserEvent>,
+    queue: Arc<Mutex<VecDeque<f32>>>,
+) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         if let Err(err) = run_loopback(&queue) {
-            let _ = app.emit("kriuk://aec-error", err);
             AEC_ON.store(false, Ordering::Relaxed);
+            let mut st = shared.lock().unwrap();
+            st.notice = Some("aec_same");
+            st.aec_on = false;
+            st.err = Some(err);
+            drop(st);
+            wake(&proxy);
         }
     })
 }
@@ -672,99 +713,584 @@ fn run_loopback(queue: &Arc<Mutex<VecDeque<f32>>>) -> Result<(), String> {
     Ok(())
 }
 
-fn main() {
-    tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![
-            hide_window,
-            quit_app,
-            list_devices,
-            list_outputs,
-            start_meter,
-            stop_meter,
-            meter_active,
-            set_close_to_tray,
-            get_autostart,
-            set_autostart,
-            set_reduction,
-            set_denoise,
-            set_monitor,
-            set_aec,
-            set_eq,
-            set_output,
-            set_language
-        ])
-        .setup(|app| {
-            let win = app.get_webview_window("main").expect("main window");
-            let shown: ShownAt = Arc::new(Mutex::new(Instant::now()));
-            // Autostart passes --hidden so signing in does not throw a popover on screen.
-            if std::env::args().any(|a| a == "--hidden") {
-                let _ = win.hide();
-            } else {
-                show_popover(&win, &shown);
+/// The popover and its GL surface. Dropping it gives the memory back: there is no
+/// hidden window and no second process while the app sits in the tray.
+struct Panel {
+    // Fields drop in order, so the GL surface and context go before the HWND they
+    // were made for; the window is last on purpose.
+    painter: egui_glow::Painter,
+    gl: Arc<glow::Context>,
+    state: egui_winit::State,
+    ctx: egui::Context,
+    surface: Surface<WindowSurface>,
+    context: PossiblyCurrentContext,
+    _config: GlConfig,
+    window: Window,
+    next_repaint: Option<Instant>,
+}
+
+impl Panel {
+    fn open(el: &ActiveEventLoop) -> Option<Self> {
+        let attrs = Window::default_attributes()
+            .with_title("Kriuk")
+            .with_inner_size(LogicalSize::new(380.0, 780.0))
+            .with_resizable(false)
+            .with_decorations(false)
+            .with_transparent(true)
+            .with_window_level(WindowLevel::AlwaysOnTop)
+            .with_skip_taskbar(true)
+            .with_visible(false);
+        let template = glutin::config::ConfigTemplateBuilder::new()
+            .with_transparency(true)
+            .prefer_hardware_accelerated(Some(true));
+        let (window, config) = glutin_winit::DisplayBuilder::new()
+            .with_preference(glutin_winit::ApiPreference::FallbackEgl)
+            .with_window_attributes(Some(attrs))
+            .build(el, template, |mut configs| {
+                configs.next().expect("no gl config for the panel")
+            })
+            .ok()?;
+        let window = window?;
+
+        let display = config.display();
+        let raw = window.window_handle().ok()?.as_raw();
+        let ctx_attrs = glutin::context::ContextAttributesBuilder::new().build(Some(raw));
+        let not_current = unsafe { display.create_context(&config, &ctx_attrs).ok()? };
+        let size = window.inner_size();
+        let surf_attrs = glutin::surface::SurfaceAttributesBuilder::<WindowSurface>::new().build(
+            raw,
+            NonZeroU32::new(size.width.max(1))?,
+            NonZeroU32::new(size.height.max(1))?,
+        );
+        let surface = unsafe { display.create_window_surface(&config, &surf_attrs).ok()? };
+        let context = not_current.make_current(&surface).ok()?;
+        let gl = unsafe {
+            glow::Context::from_loader_function(|s| {
+                display.get_proc_address(&std::ffi::CString::new(s).unwrap())
+            })
+        };
+        let gl = Arc::new(gl);
+        let painter = egui_glow::Painter::new(gl.clone(), "", None, false).ok()?;
+
+        if let Some((_left, _top, right, bottom)) = work_area() {
+            let s = window.scale_factor();
+            let w = (380.0 * s) as i32;
+            let h = (780.0 * s) as i32;
+            let gap = (GAP as f64 * s) as i32;
+            window.set_outer_position(PhysicalPosition::new(right - w - gap, bottom - h - gap));
+        }
+        window.set_visible(true);
+        window.focus_window();
+
+        let ctx = egui::Context::default();
+        let state = egui_winit::State::new(
+            ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            Some(window.scale_factor() as f32),
+            None,
+            None,
+        );
+        PANEL_OPEN.store(true, Ordering::Relaxed);
+        Some(Self {
+            painter,
+            gl,
+            state,
+            ctx,
+            surface,
+            context,
+            _config: config,
+            window,
+            next_repaint: None,
+        })
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) {
+            self.surface.resize(&self.context, w, h);
+        }
+    }
+
+    fn paint(&mut self, shared: &Shared) -> Vec<ui::Action> {
+        let raw = self.state.take_egui_input(&self.window);
+        let mut actions = Vec::new();
+        let output = self.ctx.run(raw, |ctx| {
+            let mut st = shared.lock().unwrap();
+            actions = ui::draw(ctx, &mut st);
+        });
+        self.state
+            .handle_platform_output(&self.window, output.platform_output.clone());
+        let clipped = self.ctx.tessellate(output.shapes, output.pixels_per_point);
+        let size = self.window.inner_size();
+        unsafe {
+            use glow::HasContext;
+            self.gl.clear_color(0.0, 0.0, 0.0, 0.0);
+            self.gl.clear(glow::COLOR_BUFFER_BIT);
+        }
+        self.painter.paint_and_update_textures(
+            [size.width.max(1), size.height.max(1)],
+            output.pixels_per_point,
+            &clipped,
+            &output.textures_delta,
+        );
+        let _ = self.surface.swap_buffers(&self.context);
+
+        let delay = output
+            .viewport_output
+            .values()
+            .map(|v| v.repaint_delay)
+            .min()
+            .unwrap_or(Duration::from_secs(3600));
+        self.next_repaint = if delay < Duration::from_secs(1) {
+            Some(Instant::now() + delay.max(Duration::from_millis(8)))
+        } else {
+            None
+        };
+        actions
+    }
+}
+
+impl Drop for Panel {
+    fn drop(&mut self) {
+        self.painter.destroy();
+        PANEL_OPEN.store(false, Ordering::Relaxed);
+    }
+}
+
+/// The taskbar eats part of the monitor, so the panel has to sit inside the work
+/// area rather than the screen bounds.
+fn work_area() -> Option<(i32, i32, i32, i32)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETWORKAREA};
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            &mut rect as *mut RECT as *mut core::ffi::c_void,
+            0,
+        )
+    };
+    (ok != 0).then_some((rect.left, rect.top, rect.right, rect.bottom))
+}
+
+struct App {
+    shared: Shared,
+    proxy: EventLoopProxy<UserEvent>,
+    panel: Option<Panel>,
+    tray: Option<TrayIcon>,
+    open_item: Option<MenuItem>,
+    quit_item: Option<MenuItem>,
+    tooltip: String,
+    chain_saved: bool,
+    shown_at: Instant,
+    started: bool,
+    follow_system_theme: bool,
+    pending: Vec<ui::Action>,
+}
+
+impl App {
+    fn show_panel(&mut self, el: &ActiveEventLoop) {
+        if let Some(panel) = &self.panel {
+            panel.window.focus_window();
+            return;
+        }
+        // Windows only reports new devices on request, so refresh on every open.
+        // Enumeration takes seconds on some machines, so it never runs on the UI
+        // thread; the list from the previous pass is already on screen.
+        refresh_devices(self.shared.clone(), self.proxy.clone());
+        self.shown_at = Instant::now();
+        match Panel::open(el) {
+            Some(panel) => self.panel = Some(panel),
+            None => {
+                self.shared.lock().unwrap().err = Some("could not open the panel".into());
             }
+        }
+    }
 
-            let open = MenuItem::with_id(app, "open", "Open Kriuk", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&open, &quit])?;
-            app.manage(TrayLabels {
-                open: open.clone(),
-                quit: quit.clone(),
-            });
-            refresh_autostart();
+    fn hide_panel(&mut self) {
+        self.panel = None;
+        self.pending.clear();
+    }
 
-            let tray_shown = shown.clone();
-            TrayIconBuilder::with_id("kriuk")
-                .icon(Image::from_bytes(include_bytes!("../../assets/tray.png"))?)
-                .tooltip("Kriuk")
-                .menu(&menu)
-                .show_menu_on_left_click(false)
-                .on_menu_event(move |app, event| match event.id().as_ref() {
-                    "open" => {
-                        if let Some(w) = app.get_webview_window("main") {
-                            show_popover(&w, &tray_shown);
-                        }
-                    }
-                    "quit" => app.exit(0),
-                    _ => {}
-                })
-                .on_tray_icon_event({
-                    let shown = shown.clone();
-                    move |tray, event| {
-                        if let TrayIconEvent::Click {
-                            button: MouseButton::Left,
-                            button_state: MouseButtonState::Up,
-                            ..
-                        } = event
-                        {
-                            if let Some(w) = tray.app_handle().get_webview_window("main") {
-                                toggle(&w, &shown);
-                            }
-                        }
-                    }
-                })
-                .build(app)?;
+    fn toggle_panel(&mut self, el: &ActiveEventLoop) {
+        if self.panel.is_some() {
+            self.hide_panel();
+        } else {
+            self.show_panel(el);
+        }
+    }
 
-            let blur_target = win.clone();
-            let blur_shown = shown.clone();
-            win.on_window_event(move |event| match event {
-                tauri::WindowEvent::Focused(false) => {
-                    if blur_shown.lock().unwrap().elapsed() > BLUR_GRACE {
-                        let _ = blur_target.hide();
+    fn build_tray(&mut self) {
+        let indonesian = self.shared.lock().unwrap().lang_id;
+        let open = MenuItem::with_id(
+            "open",
+            if indonesian { "Buka Kriuk" } else { "Open Kriuk" },
+            true,
+            None,
+        );
+        let quit = MenuItem::with_id(
+            "quit",
+            if indonesian { "Keluar" } else { "Quit" },
+            true,
+            None,
+        );
+        let menu = Menu::new();
+        let _ = menu.append(&open);
+        let _ = menu.append(&quit);
+
+        let png = image::load_from_memory(include_bytes!("../../assets/tray.png"))
+            .expect("tray.png")
+            .into_rgba8();
+        let (w, h) = png.dimensions();
+        let icon = tray_icon::Icon::from_rgba(png.into_raw(), w, h).expect("tray icon");
+        match TrayIconBuilder::new()
+            .with_menu(Box::new(menu))
+            .with_tooltip("Kriuk")
+            .with_icon(icon)
+            .build()
+        {
+            Ok(tray) => self.tray = Some(tray),
+            Err(err) => eprintln!("kriuk tray: {err}"),
+        }
+        self.open_item = Some(open);
+        self.quit_item = Some(quit);
+    }
+
+    fn relabel_tray(&mut self) {
+        let indonesian = self.shared.lock().unwrap().lang_id;
+        if let Some(item) = &self.open_item {
+            let _ = item.set_text(if indonesian { "Buka Kriuk" } else { "Open Kriuk" });
+        }
+        if let Some(item) = &self.quit_item {
+            let _ = item.set_text(if indonesian { "Keluar" } else { "Quit" });
+        }
+    }
+
+    fn apply(&mut self, action: ui::Action, _el: &ActiveEventLoop) {
+        let mut hide = false;
+        let mut relabel = false;
+        let mut start: Option<Option<String>> = None;
+        {
+            let mut st = self.shared.lock().unwrap();
+            match action {
+                ui::Action::Tab(i) => {
+                    st.tab = i;
+                    st.open = None;
+                }
+                ui::Action::Hide => hide = true,
+                ui::Action::Denoise(on) => {
+                    st.denoise = on;
+                    DENOISE.store(on, Ordering::Relaxed);
+                    if !on {
+                        METER_RUNNING.store(false, Ordering::SeqCst);
                     }
                 }
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if CLOSE_TO_TRAY.load(Ordering::Relaxed) {
-                        api.prevent_close();
-                        let _ = blur_target.hide();
+                ui::Action::Reduction(i) => {
+                    st.reduction = i;
+                    REDUCTION.store(i, Ordering::Relaxed);
+                }
+                ui::Action::Eq(i) => {
+                    st.eq = i;
+                    EQ_PRESET.store(i, Ordering::Relaxed);
+                }
+                ui::Action::Aec(on) => {
+                    st.aec_on = on;
+                    st.notice = None;
+                    AEC_ON.store(on, Ordering::Relaxed);
+                }
+                ui::Action::Spk(on) => {
+                    st.spk_on = on;
+                    st.notice = None;
+                    MONITOR_ON.store(on, Ordering::Relaxed);
+                }
+                ui::Action::Mic(device) => {
+                    st.mic = device;
+                }
+                ui::Action::SpkDevice(device) => {
+                    *MONITOR_DEVICE.lock().unwrap() = device.clone();
+                    st.spk = device;
+                }
+                ui::Action::TestToggle => {
+                    if st.listening {
+                        let peak = st.peak;
+                        if peak > 0.0 {
+                            st.tests.push(20.0 * peak.log10());
+                        }
+                        METER_RUNNING.store(false, Ordering::SeqCst);
+                    } else {
+                        start = Some(st.mic.clone());
+                    }
+                }
+                ui::Action::Lang(id) => {
+                    st.lang_id = id;
+                    LANG_ID.store(id, Ordering::Relaxed);
+                    relabel = true;
+                }
+                ui::Action::Dark(dark) => {
+                    st.dark = dark;
+                    st.dark_set = true;
+                    self.follow_system_theme = false;
+                }
+                ui::Action::CloseToTray(on) => {
+                    st.close_to_tray = on;
+                    CLOSE_TO_TRAY.store(on, Ordering::Relaxed);
+                }
+                ui::Action::Autostart(on) => match set_autostart(on) {
+                    Ok(()) => st.autostart = on,
+                    Err(err) => st.err = Some(err),
+                },
+            }
+            let saved = st.saved();
+            drop(st);
+            settings::save(&saved);
+        }
+
+        if relabel {
+            self.relabel_tray();
+        }
+        if let Some(device) = start {
+            start_meter(self.shared.clone(), self.proxy.clone(), device);
+        }
+        if hide {
+            self.hide_panel();
+        } else if let Some(panel) = &self.panel {
+            panel.window.request_redraw();
+        }
+    }
+
+    fn sync_tray(&mut self) {
+        let (listening, indonesian) = {
+            let st = self.shared.lock().unwrap();
+            (st.listening, st.lang_id)
+        };
+        let text = match (listening, indonesian) {
+            (true, true) => "Kriuk — mendengarkan",
+            (true, false) => "Kriuk — listening",
+            _ => "Kriuk",
+        };
+        if self.tooltip != text {
+            self.tooltip = text.to_string();
+            if let Some(tray) = &self.tray {
+                let _ = tray.set_tooltip(Some(text));
+            }
+        }
+        // The chain flag is what brings it back on the next launch, so it is
+        // written when the chain starts or stops, not only when a switch moves.
+        if self.chain_saved != listening {
+            self.chain_saved = listening;
+            let saved = self.shared.lock().unwrap().saved();
+            settings::save(&saved);
+        }
+    }
+}
+
+impl ApplicationHandler<UserEvent> for App {
+    fn resumed(&mut self, el: &ActiveEventLoop) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        if self.follow_system_theme {
+            let dark = el
+                .system_theme()
+                .map(|theme| theme == winit::window::Theme::Dark)
+                .unwrap_or(false);
+            self.shared.lock().unwrap().dark = dark;
+        }
+        self.build_tray();
+        refresh_autostart();
+        self.shared.lock().unwrap().autostart = get_autostart();
+
+        let hidden = std::env::args().any(|a| a == "--hidden");
+        if !hidden {
+            self.show_panel(el);
+        }
+        self.sync_tray();
+    }
+
+    fn window_event(&mut self, el: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
+        let is_panel = self.panel.as_ref().map(|p| p.window.id()) == Some(id);
+        if !is_panel {
+            return;
+        }
+        let close_to_tray = CLOSE_TO_TRAY.load(Ordering::Relaxed);
+        let mut hide = false;
+        let mut exit = false;
+
+        if let Some(panel) = self.panel.as_mut() {
+            let _ = panel.state.on_window_event(&panel.window, &event);
+            match &event {
+                WindowEvent::CloseRequested => {
+                    if close_to_tray {
+                        hide = true;
+                    } else {
+                        exit = true;
+                    }
+                }
+                WindowEvent::Focused(false) => {
+                    if self.shown_at.elapsed() > BLUR_GRACE {
+                        hide = true;
+                    }
+                }
+                WindowEvent::Resized(size) => panel.resize(size.width, size.height),
+                WindowEvent::RedrawRequested => {
+                    let shared = self.shared.clone();
+                    let actions = panel.paint(&shared);
+                    self.pending.extend(actions);
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    let esc = event.logical_key
+                        == winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape);
+                    if esc && event.state == winit::event::ElementState::Pressed {
+                        hide = true;
                     }
                 }
                 _ => {}
-            });
+            }
+        }
 
-            Ok(())
-        })
-        .run(tauri::generate_context!())
-        .expect("failed to run kriuk");
+        if hide {
+            self.hide_panel();
+        }
+        if exit {
+            el.exit();
+        }
+        if !self.pending.is_empty() {
+            let actions = std::mem::take(&mut self.pending);
+            for action in actions {
+                self.apply(action, el);
+            }
+        }
+    }
+
+    fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
+        match event {
+            UserEvent::Wake => {
+                self.sync_tray();
+                if let Some(panel) = &self.panel {
+                    panel.window.request_redraw();
+                }
+            }
+            UserEvent::TrayClick => self.toggle_panel(el),
+            UserEvent::Menu(id) => match id.as_str() {
+                "open" => self.show_panel(el),
+                "quit" => el.exit(),
+                _ => {}
+            },
+        }
+    }
+
+    fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        match self.pending_repaint() {
+            Some(at) if self.panel.is_some() => {
+                if Instant::now() >= at {
+                    if let Some(panel) = &self.panel {
+                        panel.window.request_redraw();
+                    }
+                    el.set_control_flow(ControlFlow::Wait);
+                } else {
+                    el.set_control_flow(ControlFlow::WaitUntil(at));
+                }
+            }
+            _ => el.set_control_flow(ControlFlow::Wait),
+        }
+    }
+}
+
+impl App {
+    fn pending_repaint(&mut self) -> Option<Instant> {
+        let at = self.panel.as_ref().and_then(|p| p.next_repaint)?;
+        if Instant::now() >= at {
+            if let Some(panel) = self.panel.as_mut() {
+                panel.next_repaint = None;
+            }
+            return Some(at);
+        }
+        Some(at)
+    }
+}
+
+fn main() {
+    let saved = settings::load();
+    let follow_system_theme = saved.dark.is_none();
+    let dark = saved.dark.unwrap_or(false);
+    // A chain that was live when the app quit comes back listening.
+    let chain = saved.chain;
+    let chain_mic = saved.mic.clone();
+
+    let state = State::from_saved(saved, dark);
+    DENOISE.store(state.denoise, Ordering::Relaxed);
+    REDUCTION.store(state.reduction, Ordering::Relaxed);
+    EQ_PRESET.store(state.eq, Ordering::Relaxed);
+    LANG_ID.store(state.lang_id, Ordering::Relaxed);
+    CLOSE_TO_TRAY.store(state.close_to_tray, Ordering::Relaxed);
+    *MONITOR_DEVICE.lock().unwrap() = state.spk.clone();
+
+    let shared: Shared = Arc::new(Mutex::new(state));
+
+    let event_loop = match EventLoop::<UserEvent>::with_user_event().build() {
+        Ok(loop_) => loop_,
+        Err(err) => {
+            eprintln!("kriuk: {err}");
+            return;
+        }
+    };
+    let proxy = event_loop.create_proxy();
+
+    {
+        let tray_proxy = proxy.clone();
+        std::thread::spawn(move || {
+            while let Ok(event) = TrayIconEvent::receiver().recv() {
+                if let TrayIconEvent::Click {
+                    button: tray_icon::MouseButton::Left,
+                    button_state: tray_icon::MouseButtonState::Up,
+                    ..
+                } = event
+                {
+                    let _ = tray_proxy.send_event(UserEvent::TrayClick);
+                }
+            }
+        });
+        let menu_proxy = proxy.clone();
+        std::thread::spawn(move || {
+            while let Ok(event) = MenuEvent::receiver().recv() {
+                let _ = menu_proxy.send_event(UserEvent::Menu(event.id.0.to_string()));
+            }
+        });
+    }
+
+    let mut app = App {
+        shared: shared.clone(),
+        proxy,
+        panel: None,
+        tray: None,
+        open_item: None,
+        quit_item: None,
+        tooltip: String::new(),
+        chain_saved: false,
+        shown_at: Instant::now(),
+        started: false,
+        follow_system_theme,
+        pending: Vec::new(),
+    };
+
+    if chain {
+        start_meter(shared.clone(), app.proxy.clone(), chain_mic);
+    }
+    refresh_devices(shared.clone(), app.proxy.clone());
+
+    if let Err(err) = event_loop.run_app(&mut app) {
+        eprintln!("kriuk: {err}");
+    }
 }
 
 #[cfg(test)]

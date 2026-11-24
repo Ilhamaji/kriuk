@@ -9,9 +9,10 @@ Tray audio utility for Windows that cleans your microphone: RNNoise denoising,
 echo cancellation from the speaker loopback, and a voice equalizer — with a live
 level meter and routing to any output device.
 
-Pure Rust on Tauri v2. One ~6 MB executable, no Electron, no Node at runtime, no
-background service, no account. The chain keeps running in the tray, so it is
-still cleaning your voice after the panel is hidden or closed.
+Pure Rust, one 5 MB executable: no Electron, no Node, no WebView2, no
+background service, no account. The panel is drawn with `egui` in the same
+process that runs the DSP. The chain keeps running in the tray, so it is still
+cleaning your voice after the panel is hidden or closed.
 
 <img src="docs/screenshot.png" width="320" alt="Kriuk popover, Audio tab, light theme">
 
@@ -21,8 +22,8 @@ still cleaning your voice after the panel is hidden or closed.
 
 Most noise-suppression tools are subscriptions that push your voice through
 someone else's server. Kriuk does the same job on the same machine that already
-has your microphone: the DSP runs on the audio callback, the UI is a webview
-that ships inside the binary, and nothing leaves the device.
+has your microphone: the DSP runs on the audio callback, the panel is drawn by
+the same Rust binary, and nothing leaves the device.
 
 ## Features
 
@@ -35,7 +36,7 @@ that ships inside the binary, and nothing leaves the device.
 | Level meter | Peak level of the processed signal, 12 bars |
 | Runs in the tray | The chain keeps running when the panel is hidden or closed; the tray tooltip reads *Kriuk — listening* while it does |
 | Start with Windows | A `HKCU` Run entry that launches the app with `--hidden`, so signing in does not open the popover; the entry is rewritten on every launch, so moving the exe repairs it |
-| Close to tray | Closing the window hides it instead of quitting; **Quit** in the tray menu still exits |
+| Close to tray | Closing the window releases it (the GL surface goes with it) instead of quitting; **Quit** in the tray menu still exits |
 | Send result to | Plays the processed audio on a chosen output device, including a virtual audio cable; a speaker on the microphone's own box is refused |
 | Language | English by default, Indonesian available in Settings; the tray menu and tooltip follow the choice |
 | Appearance | Light or dark, follows the system theme on first run |
@@ -78,15 +79,29 @@ Releases are built by GitHub Actions from the tag; see
 ## Requirements
 
 - Windows 10 1809 or newer, or Windows 11
-- WebView2 Runtime — preinstalled on Windows 11 and on most Windows 10 machines
+- No runtime to install: the panel is drawn with `egui` over OpenGL, so nothing
+  beyond Windows is needed
 
 ## Performance
 
-Measured on the development laptop with the full chain plus echo cancellation:
-0 % CPU while idle, ~4.7 % while the chain is listening, ~32 MB RAM — the same
-whether the panel is open or hidden. The release profile uses LTO, one codegen
-unit, `panic = "abort"` and stripped symbols, which is why the executable stays
-near 6 MB.
+Measured on the development laptop (Windows 11, NVIDIA graphics):
+
+| State | Private memory |
+| --- | --- |
+| In the tray, panel never opened | 2.4 MB |
+| Panel open | ~57 MB |
+| After the panel is closed | ~51 MB |
+
+CPU is 0 % while idle and ~4.7 % while the chain is listening.
+
+The panel is a real window that exists only while you are looking at it: closing
+it destroys the window, the OpenGL surface and the egui context. The graphics
+driver Windows keeps mapped afterwards is the difference between the last two
+rows, and it goes away when you quit. Compare with a WebView2 panel, which holds
+~170 MB from the first click until you quit.
+
+The release profile uses LTO, one codegen unit, `panic = "abort"` and stripped
+symbols, which is why the executable stays under 5 MB.
 
 ## Build
 
@@ -97,8 +112,8 @@ Tools with the Desktop C++ workload.
 cargo build --release --manifest-path src-tauri\Cargo.toml
 ```
 
-The executable lands in `src-tauri\target\release\kriuk.exe`. The UI in `src/`
-is embedded into the binary at build time, so there is no separate asset step.
+The executable lands in `src-tauri\target\release\kriuk.exe`. There is no asset
+step and no runtime to bundle: the panel is compiled into the binary.
 
 ## Tests
 
@@ -120,11 +135,12 @@ microphone ────────┘                                          
 
 | Path | Purpose |
 |---|---|
-| `src-tauri/src/main.rs` | tray icon and menu, popover placement, blur and close handling, autostart entry, cpal capture and monitor streams, loopback reference, IPC commands |
+| `src-tauri/src/main.rs` | window and tray, panel placement, blur and close handling, autostart entry, cpal capture and monitor streams, loopback reference, chain state |
+| `src-tauri/src/ui.rs` | the popover drawn with `egui`: rows, toggles, segmented controls, dropdowns, meter |
+| `src-tauri/src/settings.rs` | the remembered chain, devices, language and theme in `%APPDATA%\Kriuk\settings.json` |
 | `src-tauri/src/aec.rs` | PBFDAF echo canceller and its unit tests |
 | `src-tauri/src/eq.rs` | biquad equalizer, presets, auto curve |
-| `src/index.html`, `src/styles.css`, `src/app.js` | popover UI, no framework |
-| `src-tauri/tauri.conf.json` | frameless transparent always-on-top window |
+| `src/` | the HTML mock-up the demo video is rendered from; not part of the binary |
 | `tools/make-icon.js` | generates the icon set without dependencies |
 | `tools/serve.mjs`, `tools/render-promo.mjs`, `tools/build-video.mjs` | preview server and frame renderer for the demo video |
 | `DESIGN.md` | visual specification |

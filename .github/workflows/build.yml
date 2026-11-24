@@ -1,0 +1,49 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Test
+        run: cargo test --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Build
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Stage
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item src-tauri\target\release\kriuk.exe dist\Kriuk.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Kriuk-windows-x64
+          path: dist/Kriuk.exe
+
+      # Tagging v* publishes the same exe as a release asset.
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create ${{ github.ref_name }} dist/Kriuk.exe
+          --title "Kriuk ${{ github.ref_name }}"
+          --generate-notes

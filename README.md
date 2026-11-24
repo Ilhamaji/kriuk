@@ -1,50 +1,118 @@
 # Kriuk
 
-Tray audio utility untuk Windows. Tauri v2 (Rust + WebView2), UI statis di `src/`.
+[![build](https://github.com/Ilhamaji/kriuk/actions/workflows/build.yml/badge.svg)](https://github.com/Ilhamaji/kriuk/actions/workflows/build.yml)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-lightgrey.svg)](#requirements)
+
+Tray audio utility for Windows that cleans a microphone signal: RNNoise
+denoising, echo cancellation, and a voice equalizer, with a live level meter
+and routing to any output device.
+
+Pure Rust on Tauri v2. One ~6 MB executable, no Electron, no Node at runtime,
+no background service.
+
+<img src="docs/screenshot-light.png" width="300" alt="Kriuk in light theme">
+<img src="docs/screenshot-dark.png" width="300" alt="Kriuk in dark theme">
+
+## Features
+
+| Feature | How it works |
+|---|---|
+| Mic noise cancellation | RNNoise (`nnnoiseless`) at 48 kHz, 10 ms frames, on the WASAPI audio thread |
+| Reduction level | Light / Balanced / Maximum = 40 / 75 / 100 % wet mix |
+| Echo cancellation | Partitioned block frequency-domain adaptive filter (`rustfft`), 4 partitions × 480 samples ≈ 40 ms, reference from a WASAPI speaker loopback, Geigel double-talk guard |
+| Equalizer | RBJ biquads: Neutral (true bypass), Clear, Warm, and Auto, which measures the 300 Hz / 3 kHz band balance twice a second and tilts the curve, clamped to ±4–5 dB |
+| Level meter | Peak level of the processed signal |
+| Send result to | Plays the processed audio on a chosen output device, including a virtual audio cable |
+| Language | English by default, Indonesian available in Settings |
+| Appearance | Light or dark, follows the system theme on first run |
+
+Processing order: echo cancellation → denoiser → equalizer → meter / routing.
+A disabled stage costs one atomic load per frame; no extra thread, no extra
+stream.
+
+Measured on the development laptop: 0 % CPU idle, ~4.7 % with the full chain
+plus echo cancellation, ~32 MB RAM.
+
+## Requirements
+
+- Windows 10 1809 or newer, or Windows 11
+- WebView2 Runtime — preinstalled on Windows 11 and on most Windows 10 machines
+
+## Install
+
+Download `Kriuk.exe` from [Releases](../../releases) and run it. There is no
+installer: the app lives in the tray, and deleting the file removes it.
+
+The build is not code-signed, so Windows SmartScreen shows
+"Windows protected your PC" on first run. Choose **More info → Run anyway**.
+A code-signing certificate is the only way to remove that prompt.
+
+## Usage
+
+1. Pick a microphone and leave **Microphone** on.
+2. Press **Test mic** to start the chain; the meter shows the processed level.
+3. **Echo cancellation** removes what your speaker plays from the mic signal.
+   It needs the chain running and the reference speaker selected under
+   **Send result to**.
+4. To feed other apps, set **Send result to** to a virtual cable such as
+   VB-CABLE or VoiceMeeter, then set that cable as the microphone in the other
+   app. Windows has no way to inject audio into another app's mic without a
+   virtual device.
+
+Hiding the popover stops the chain and closes the microphone.
 
 ## Build
 
-Butuh Rust (MSVC toolchain) + VS Build Tools.
+Requires the Rust MSVC toolchain and Visual Studio Build Tools with the
+Desktop C++ workload.
 
 ```powershell
 cargo build --release --manifest-path src-tauri\Cargo.toml
 ```
 
-Hasil: `src-tauri\target\release\kriuk.exe` (single file, ~6 MB). WebView2 Runtime dipakai dari sistem.
+The executable lands in `src-tauri\target\release\kriuk.exe`. The UI in `src/`
+is embedded into the binary at build time, so no separate asset step is needed.
 
-## Yang berjalan
+Tests cover the DSP, not the UI:
 
-| Fitur | Cara kerja |
+```powershell
+cargo test --manifest-path src-tauri\Cargo.toml
+```
+
+They assert echo reduction of 10 dB or more across the whole 40 ms filter span,
+that double talk does not swallow the local voice, and that each equalizer
+preset moves the band it claims to.
+
+## How it works
+
+```
+speaker loopback ──┐
+                   ├─→ echo canceller ─→ RNNoise ─→ equalizer ─→ meter
+microphone ────────┘                                            └→ output device
+```
+
+| Path | Purpose |
 |---|---|
-| Peredaman mikrofon | RNNoise (`nnnoiseless`) 48 kHz, frame 10 ms, di thread audio WASAPI |
-| Tingkat peredaman | Ringan/Seimbang/Maksimal = campuran sinyal bersih 40/75/100% |
-| Echo cancellation | PBFDAF (rustfft), 4 partisi × 480 sampel (~40 ms), referensi loopback WASAPI speaker, penjaga double-talk Geigel, 18–33 dB di uji sintetis |
-| Equalizer | Biquad RBJ: Netral (bypass), Jelas, Hangat, Auto (ukur pita 300 Hz / 3 kHz tiap 0,5 s lalu menyesuaikan, dibatasi ±4–5 dB) |
-| Meter | Peak level dari sinyal yang sudah diproses |
-| Kirim hasil ke | Hasil olahan diputar ke perangkat keluaran pilihan (bisa kabel audio virtual) |
-| Bahasa | English (default) atau Indonesia, di Setelan, tersimpan di perangkat |
-| Tampilan | Terang atau gelap, mengikuti sistem saat pertama dibuka, tersimpan di perangkat |
+| `src-tauri/src/main.rs` | tray icon, popover placement, hide on blur, cpal capture and monitor streams, loopback reference, IPC commands |
+| `src-tauri/src/aec.rs` | PBFDAF echo canceller and its unit tests |
+| `src-tauri/src/eq.rs` | biquad equalizer, presets, auto curve |
+| `src/index.html`, `src/styles.css`, `src/app.js` | popover UI, no framework |
+| `src-tauri/tauri.conf.json` | frameless transparent always-on-top window |
+| `tools/make-icon.js` | generates the icon set without dependencies |
+| `DESIGN.md` | visual specification |
+| `REMAKE-RUST.md`, `REPORT.md` | reverse-engineering notes that led to this build |
 
-Urutan pemrosesan: echo cancellation → denoiser → equalizer → meter/monitor.
-Rantai ini hidup selama "Tes mic" berjalan; menutup popover menghentikannya. Fitur DSP yang mati tidak menambah biaya: satu atomic load per frame, tanpa thread dan tanpa stream tambahan.
+## Limitations
 
-Terukur di laptop uji: 0 % CPU saat idle, ~4,7 % saat rantai penuh + echo cancellation, RAM ~32 MB.
+- The audio chain runs while the mic test is active. Continuous background
+  processing while the panel is hidden is not implemented yet.
+- Echo cancellation is validated on synthetic signals, not yet measured in a
+  real room; the loopback reference also cannot model a speaker that is not the
+  selected output device.
+- The tray menu is English only.
+- Unsigned binary, so expect the SmartScreen prompt.
 
-Pilih perangkat keluaran seperti VB-Cable/VoiceMeeter sebagai "Kirim hasil ke", lalu set mikrofon aplikasi lain ke kabel itu: mereka akan menerima suara yang sudah bersih.
+## License
 
-## Yang belum bisa
-
-Echo cancellation hanya menghapus suara yang keluar lewat speaker yang dipilih; ia tidak bisa menyisipkan diri ke aplikasi lain tanpa kabel audio virtual. Speaker noise cancellation juga hanya mungkin lewat driver tersebut. Lihat `REMAKE-RUST.md` untuk urutan implementasi DSP.
-
-## Isi
-
-| Path | Fungsi |
-|---|---|
-| `src/index.html`, `src/styles.css`, `src/app.js` | UI popover 380×780 (di-embed ke exe saat build) |
-| `src-tauri/src/main.rs` | tray icon, posisi popover, hide-on-blur, meter mikrofon (cpal/WASAPI), loopback echo |
-| `src-tauri/src/aec.rs` | echo canceller PBFDAF + unit test ERLE |
-| `src-tauri/src/eq.rs` | equalizer biquad + preset + auto kurva |
-| `src-tauri/tauri.conf.json` | window frameless + transparan, `withGlobalTauri` |
-| `tools/make-icon.js` | generator `assets/icon.png`, `assets/tray.png`, `assets/icon.ico` |
-| `DESIGN.md` | spesifikasi desain |
-| `REPORT.md`, `REMAKE-RUST.md` | hasil reverse engineering Krisp + blueprint |
+[MIT](LICENSE)

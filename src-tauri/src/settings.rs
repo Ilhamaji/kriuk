@@ -53,7 +53,11 @@ pub fn save(saved: &Saved) {
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    if let Ok(text) = serde_json::to_string_pretty(saved) {
-        let _ = std::fs::write(file, text);
+    let Ok(text) = serde_json::to_string_pretty(saved) else { return };
+    // Write beside the target, then rename over it: a crash mid-write must not
+    // leave a truncated file that resets every remembered setting on launch.
+    let tmp = file.with_extension("json.tmp");
+    if std::fs::write(&tmp, text).is_ok() {
+        let _ = std::fs::rename(&tmp, &file);
     }
 }

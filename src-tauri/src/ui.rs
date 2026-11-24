@@ -520,6 +520,18 @@ fn footer(ui: &mut egui::Ui, p: &Pal, st: &mut State) {
     );
 }
 
+/// Keeps the remembered device in the dropdown while the async enumeration is
+/// still running or the device is momentarily absent. Without it the row shows
+/// "Default" for the first seconds of every launch, so a remembered pick looks
+/// forgotten.
+fn remember(items: &mut Vec<String>, saved: Option<&String>) {
+    if let Some(name) = saved {
+        if !items.iter().any(|d| d == name) {
+            items.push(name.clone());
+        }
+    }
+}
+
 fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     let id = st.lang_id;
     banner(ui, p, st);
@@ -539,6 +551,7 @@ fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
 
     let mut mics = vec![tr(id, "mic_default")];
     mics.extend(st.devices.iter().cloned());
+    remember(&mut mics, st.mic.as_ref());
     let mic_idx = st
         .mic
         .as_ref()
@@ -605,6 +618,7 @@ fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
 
     let mut outs = vec![tr(id, "spk_default")];
     outs.extend(st.outputs.iter().cloned());
+    remember(&mut outs, st.spk.as_ref());
     let spk_idx = st
         .spk
         .as_ref()
@@ -1321,5 +1335,17 @@ mod tests {
             });
             assert!(!out.shapes.is_empty());
         }
+    }
+
+    /// The saved device must stay selected even before enumeration returns it.
+    #[test]
+    fn a_remembered_device_stays_in_the_dropdown() {
+        let mut items = vec!["Default microphone".to_string(), "Mic A".to_string()];
+        remember(&mut items, Some(&"Mic A".to_string()));
+        assert_eq!(items.len(), 2, "an already listed device is not duplicated");
+        remember(&mut items, Some(&"Mic B".to_string()));
+        assert_eq!(items.last().map(String::as_str), Some("Mic B"));
+        remember(&mut items, None);
+        assert_eq!(items.len(), 3);
     }
 }

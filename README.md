@@ -10,7 +10,8 @@ echo cancellation from the speaker loopback, and a voice equalizer — with a li
 level meter and routing to any output device.
 
 Pure Rust on Tauri v2. One ~6 MB executable, no Electron, no Node at runtime, no
-background service, no account.
+background service, no account. The chain keeps running in the tray, so it is
+still cleaning your voice after the panel is hidden or closed.
 
 <img src="docs/screenshot.png" width="320" alt="Kriuk popover, Audio tab, light theme">
 
@@ -32,6 +33,9 @@ that ships inside the binary, and nothing leaves the device.
 | Echo cancellation | Partitioned block frequency-domain adaptive filter (`rustfft`), 4 partitions × 480 samples ≈ 40 ms, reference from a WASAPI speaker loopback, Geigel double-talk guard |
 | Equalizer | RBJ biquads: Neutral (true bypass), Clear, Warm, and Auto, which measures the 300 Hz / 3 kHz band balance twice a second and tilts the curve, clamped to ±4–5 dB |
 | Level meter | Peak level of the processed signal, 12 bars |
+| Runs in the tray | The chain keeps running when the panel is hidden or closed; the tray tooltip reads *Kriuk — listening* while it does |
+| Start with Windows | A `HKCU` Run entry that launches the app with `--hidden`, so signing in does not open the popover |
+| Close to tray | Closing the window hides it instead of quitting; **Quit** in the tray menu still exits |
 | Send result to | Plays the processed audio on a chosen output device, including a virtual audio cable |
 | Language | English by default, Indonesian available in Settings |
 | Appearance | Light or dark, follows the system theme on first run |
@@ -43,16 +47,26 @@ stream.
 ## Quick start
 
 1. Download [`Kriuk.exe`](https://github.com/Ilhamaji/kriuk/releases/latest/download/Kriuk.exe) and run it. The window is a popover anchored to the tray icon.
-2. Pick a microphone and press **Test mic**; the meter shows the processed level.
-3. Turn on **Echo cancellation** if your speakers leak into the mic.
+2. Pick a microphone and press **Start**; the meter shows the processed level.
+3. Turn on **Echo cancellation** if your speakers leak into the mic, and pick an equalizer preset.
 4. To feed another app (Zoom, Meet, Discord), set **Send result to** to a virtual cable such as VB-CABLE or VoiceMeeter, then choose that cable as the microphone in the other app. Windows has no way to inject audio into another app's mic without a virtual device.
+5. Open **Settings** and turn on **Start with Windows** and **Close to tray**, so the chain is already running before your next call.
 
-Hiding the popover stops the chain and closes the microphone.
+Hiding or closing the popover keeps the chain running — that is what makes it
+usable during a call. The tray tooltip shows *Kriuk — listening* while the
+microphone is open. Press **Stop**, or choose **Quit** in the tray menu, to
+release it.
+
+The last chain state, microphone, output device, language and theme are all
+remembered: launch the app and it comes back listening on the same devices. If a
+device disappears, the app falls back to the system default.
 
 ## Install
 
 No installer. The file is the app: put it anywhere, run it, and deleting it
-removes the app. There is no service, driver, or registry entry.
+removes the app. There is no service and no driver. The only registry write is
+the `HKCU\...\Run` entry that **Start with Windows** adds when you turn it on,
+and turning the switch off deletes it.
 
 The binary is not code-signed, so Windows SmartScreen shows "Windows protected
 your PC" on first run — choose **More info → Run anyway**. A code-signing
@@ -69,9 +83,10 @@ Releases are built by GitHub Actions from the tag; see
 ## Performance
 
 Measured on the development laptop with the full chain plus echo cancellation:
-0 % CPU idle, ~4.7 % while processing, ~32 MB RAM. The release profile uses LTO,
-one codegen unit, `panic = "abort"` and stripped symbols, which is why the
-executable stays near 6 MB.
+0 % CPU while idle, ~4.7 % while the chain is listening, ~32 MB RAM — the same
+whether the panel is open or hidden. The release profile uses LTO, one codegen
+unit, `panic = "abort"` and stripped symbols, which is why the executable stays
+near 6 MB.
 
 ## Build
 
@@ -105,7 +120,7 @@ microphone ────────┘                                          
 
 | Path | Purpose |
 |---|---|
-| `src-tauri/src/main.rs` | tray icon, popover placement, hide on blur, cpal capture and monitor streams, loopback reference, IPC commands |
+| `src-tauri/src/main.rs` | tray icon and menu, popover placement, blur and close handling, autostart entry, cpal capture and monitor streams, loopback reference, IPC commands |
 | `src-tauri/src/aec.rs` | PBFDAF echo canceller and its unit tests |
 | `src-tauri/src/eq.rs` | biquad equalizer, presets, auto curve |
 | `src/index.html`, `src/styles.css`, `src/app.js` | popover UI, no framework |
@@ -123,7 +138,12 @@ on. The list refreshes when you reopen the popover.
 
 **The meter moves but the other app hears nothing.** *Send result to* must point
 at the device the other app listens to — or at a virtual cable that the other
-app uses as its mic. The chain only runs while **Test mic** is active.
+app uses as its mic. The chain only runs after **Start**; hiding the panel does
+not stop it.
+
+**The app quit when I closed the window.** *Settings → Close to tray* was off, so
+the close really did exit. Turn it back on, or use **Quit** in the tray menu when
+you do want to exit.
 
 **Echo is still there.** Echo cancellation can only subtract what the selected
 output device actually plays; a headset on a different device gives it no
@@ -137,14 +157,21 @@ reference. It also needs a second or two to converge after you start the chain.
 No network code, no telemetry, no accounts, no audio written to disk. The
 activity list in the app is in-memory and disappears when the app closes.
 
+The microphone stays open while the chain runs, including when the panel is
+hidden or closed — that is the point of the feature, and the tray tooltip is the
+only indicator. **Stop** or **Quit** releases the device. Because the chain state
+is restored on launch, an app that was listening when you closed it opens the
+microphone again on the next start.
+
 ## Limitations
 
-- The chain runs while the mic test is active. Continuous background processing
-  with the panel hidden is not implemented yet.
+- **Start with Windows** records the path of the executable at the moment you
+  enable it. Move `Kriuk.exe` afterwards and the entry points at nothing —
+  toggle the switch off and on again.
 - Echo cancellation is validated on synthetic signals, not yet measured in a
   real room, and the loopback reference cannot model a speaker that is not the
   selected output device.
-- The tray menu is English only.
+- The tray menu and the tray tooltip are English only.
 - Unsigned binary, so expect the SmartScreen prompt on first run.
 
 ## Contributing

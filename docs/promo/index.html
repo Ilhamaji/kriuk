@@ -133,7 +133,7 @@
   <div class="lockup" id="lockup">
     <div class="bars" id="lockBars"></div>
     <div class="name" id="lockName">kriuk<em>.</em></div>
-    <div class="tag" id="lockTag">Your quiet room is ready.</div>
+    <div class="tag" id="lockTag">Your quiet room, always on.</div>
     <div class="sub" id="lockSub">Free and open source · Windows 10/11</div>
   </div>
 </div>
@@ -209,6 +209,9 @@ function ready() {
     eqLabel: doc.getElementById('eq-label'),
     langId: doc.querySelector('#lang button[data-value="id"]'),
     themeDark: doc.querySelector('#theme button[data-value="dark"]'),
+    tabAudio: doc.querySelector('.tab[data-tab="audio"]'),
+    tabSettings: doc.querySelector('.tab[data-tab="settings"]'),
+    autostart: doc.getElementById('autostart-toggle'),
     check: doc.querySelector('.banner-check svg path'),
     root: doc.documentElement,
   };
@@ -233,13 +236,19 @@ function eqRects() {
 function setTime(t) {
   if (!doc && !ready()) return;
 
-  /* BEAT 4 — theme and language first: the app's own renderStatus() rewrites
-     the labels we set below, so the switches must happen before them */
+  /* BEAT 4 — theme, language and the tray settings the story is now about */
   const dark = t >= 8.6;
   ui.root.setAttribute('data-theme', dark ? 'dark' : 'light');
   stage.classList.toggle('is-dark', dark);
   if (t >= 9.55 && !ui.langId.classList.contains('is-active')) ui.langId.click();
   else if (t < 9.55 && ui.langId.classList.contains('is-active')) ui.langId.click();
+  const onSettings = t >= 9.55;
+  const onSettingsTab = ui.tabSettings.classList.contains('is-active');
+  if (onSettings !== onSettingsTab) (onSettings ? ui.tabSettings : ui.tabAudio).click();
+  /* the tray settings land as the caption names them */
+  const autoOn = t >= 10.05;
+  ui.autostart.classList.toggle('is-on', autoOn);
+  ui.autostart.setAttribute('aria-checked', String(autoOn));
 
   /* BEAT 1 — the popover arrives */
   const enter = easeOut(seg(t, 0.1, 0.55));
@@ -272,13 +281,14 @@ function setTime(t) {
     'translateY(' + (24 * (1 - enter) + 40 * outro + pan).toFixed(2) + 'px)' +
     ' scale(' + (pulse * (1 - 0.08 * outro) * zoom).toFixed(4) + ')';
 
-  /* BEAT 2 — test running */
+  /* BEAT 2 — the chain is running */
   const testing = t >= 2.5 && t < 11.5;
+  const id = ui.langId.classList.contains('is-active');
   ui.micTest.classList.toggle('is-live', testing);
-  ui.micTest.textContent = testing ? (ui.langId.classList.contains('is-active') ? 'Hentikan' : 'Stop') : (ui.langId.classList.contains('is-active') ? 'Tes mic' : 'Test mic');
+  ui.micTest.textContent = testing ? (id ? 'Hentikan' : 'Stop') : (id ? 'Mulai' : 'Start');
   ui.meterState.textContent = testing
-    ? (ui.langId.classList.contains('is-active') ? 'Mendengarkan…' : 'Listening…')
-    : (ui.langId.classList.contains('is-active') ? 'Tidak merekam' : 'Not recording');
+    ? (id ? 'Mic aktif' : 'Mic live')
+    : (id ? 'Mic mati' : 'Mic off');
 
   /* the app lights a contiguous run of bars from a level, so do the same */
   const total = ui.meterBars.length || 12;
@@ -303,7 +313,6 @@ function setTime(t) {
   const echoOn = t >= 5.5;
   ui.echoToggle.classList.toggle('is-on', echoOn);
   ui.echoToggle.setAttribute('aria-checked', echoOn ? 'true' : 'false');
-  const id = ui.langId.classList.contains('is-active');
   ui.echoSub.textContent = echoOn ? (id ? 'Gema speaker dihapus' : 'Speaker echo removed') : (id ? 'Mati' : 'Off');
 
   const eqTo = t >= 6.9;

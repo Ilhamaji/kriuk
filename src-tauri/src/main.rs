@@ -4,6 +4,8 @@ mod aec;
 mod eq;
 
 use std::collections::VecDeque;
+use std::os::windows::process::CommandExt;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -40,6 +42,8 @@ static MONITOR_DEVICE: Mutex<Option<String>> = Mutex::new(None);
 static AEC_ON: AtomicBool = AtomicBool::new(false);
 /// Equalizer preset; 0 is a true bypass.
 static EQ_PRESET: AtomicU8 = AtomicU8::new(0);
+/// Closing the window hides it instead of exiting, so the chain survives.
+static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
 
 type ShownAt = Arc<Mutex<Instant>>;
 
@@ -77,7 +81,7 @@ fn show_popover(win: &WebviewWindow, shown: &ShownAt) {
 
 fn toggle(win: &WebviewWindow, shown: &ShownAt) {
     if win.is_visible().unwrap_or(false) {
-        halt_meter(win.app_handle());
+        // Hiding is not stopping: the chain keeps running in the tray.
         let _ = win.hide();
         return;
     }
@@ -86,7 +90,6 @@ fn toggle(win: &WebviewWindow, shown: &ShownAt) {
 
 #[tauri::command]
 fn hide_window(win: WebviewWindow) {
-    halt_meter(win.app_handle());
     let _ = win.hide();
 }
 
@@ -148,12 +151,14 @@ fn start_meter(app: AppHandle, device: Option<String>) {
     if METER_RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    set_tray_status(&app, true);
     std::thread::spawn(move || {
         if let Err(err) = run_meter(&app, device.as_deref()) {
             let _ = app.emit("kriuk://meter-error", err);
         }
         MONITOR_ON.store(false, Ordering::Relaxed);
         METER_RUNNING.store(false, Ordering::SeqCst);
+        set_tray_status(&app, false);
     });
 }
 
@@ -162,10 +167,65 @@ fn stop_meter() {
     METER_RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// Closes the mic stream when the popover goes away, so nothing keeps listening unseen.
-fn halt_meter(app: &AppHandle) {
-    if METER_RUNNING.swap(false, Ordering::SeqCst) {
-        let _ = app.emit("kriuk://meter-stopped", ());
+#[tauri::command]
+fn meter_active() -> bool {
+    METER_RUNNING.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+fn set_close_to_tray(on: bool) {
+    CLOSE_TO_TRAY.store(on, Ordering::Relaxed);
+}
+
+/// The tray tooltip is the only sign that the chain is live while the popover is hidden.
+fn set_tray_status(app: &AppHandle, listening: bool) {
+    if let Some(tray) = app.tray_by_id("kriuk") {
+        let _ = tray.set_tooltip(Some(if listening { "Kriuk — listening" } else { "Kriuk" }));
+    }
+}
+
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "Kriuk";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[tauri::command]
+fn get_autostart() -> bool {
+    Command::new("reg")
+        .args(["query", RUN_KEY, "/v", RUN_VALUE])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+#[tauri::command]
+fn set_autostart(on: bool) -> Result<(), String> {
+    let mut cmd = Command::new("reg");
+    if on {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        // --hidden starts in the tray at sign-in instead of opening the popover.
+        cmd.args([
+            "add",
+            RUN_KEY,
+            "/v",
+            RUN_VALUE,
+            "/t",
+            "REG_SZ",
+            "/d",
+            &format!("\"{}\" --hidden", exe.display()),
+            "/f",
+        ]);
+    } else {
+        cmd.args(["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
+    }
+    let out = cmd
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
     }
 }
 
@@ -527,6 +587,10 @@ fn main() {
             list_outputs,
             start_meter,
             stop_meter,
+            meter_active,
+            set_close_to_tray,
+            get_autostart,
+            set_autostart,
             set_reduction,
             set_denoise,
             set_monitor,
@@ -537,7 +601,12 @@ fn main() {
         .setup(|app| {
             let win = app.get_webview_window("main").expect("main window");
             let shown: ShownAt = Arc::new(Mutex::new(Instant::now()));
-            show_popover(&win, &shown);
+            // Autostart passes --hidden so signing in does not throw a popover on screen.
+            if std::env::args().any(|a| a == "--hidden") {
+                let _ = win.hide();
+            } else {
+                show_popover(&win, &shown);
+            }
 
             let open = MenuItem::with_id(app, "open", "Open Kriuk", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -577,13 +646,19 @@ fn main() {
 
             let blur_target = win.clone();
             let blur_shown = shown.clone();
-            win.on_window_event(move |event| {
-                if let tauri::WindowEvent::Focused(false) = event {
+            win.on_window_event(move |event| match event {
+                tauri::WindowEvent::Focused(false) => {
                     if blur_shown.lock().unwrap().elapsed() > BLUR_GRACE {
-                        halt_meter(blur_target.app_handle());
                         let _ = blur_target.hide();
                     }
                 }
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if CLOSE_TO_TRAY.load(Ordering::Relaxed) {
+                        api.prevent_close();
+                        let _ = blur_target.hide();
+                    }
+                }
+                _ => {}
             });
 
             Ok(())

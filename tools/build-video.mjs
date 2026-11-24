@@ -22,9 +22,9 @@ if (frames < FPS * DURATION) throw new Error(`only ${frames}/${FPS * DURATION} f
 /* captions: [text, in, out, colour] — colour flips to a light tone on the dark beat */
 const captions = [
   ['KRIUK \u2014 WINDOWS TRAY AUDIO', 0.7, 2.4, '0x6E6A65'],
-  ['NOISE GONE IN ONE CLICK', 2.6, 5.3, '0x6E6A65'],
+  ['ONE CLICK \u00b7 CLEANER VOICE', 2.6, 5.3, '0x6E6A65'],
   ['ECHO CANCELLED \u00b7 CLEAR EQ', 5.6, 8.3, '0x6E6A65'],
-  ['DARK MODE \u00b7 BAHASA INDONESIA', 8.8, 11.3, '0xA6A099'],
+  ['RUNS IN TRAY \u00b7 STARTS WITH WINDOWS', 8.8, 11.3, '0xA6A099'],
 ];
 
 const draw = captions.map(([text, from, to, color]) =>
@@ -35,7 +35,7 @@ const draw = captions.map(([text, from, to, color]) =>
 /* one-shot effects: [lavfi source, start, gain] */
 const SFX = [
   ['sine=f=520:d=0.2,afade=t=out:st=0.02:d=0.18', 0.12, 0.5],    // panel lands
-  ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 2.5, 0.32], // test mic
+  ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 2.5, 0.32], // chain starts
   ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 5.5, 0.3],  // echo on
   ['sine=f=1700:d=0.05,afade=t=out:st=0.004:d=0.045', 6.9, 0.26], // eq clear
   ['sine=f=1100:d=0.08,afade=t=out:st=0.006:d=0.07', 8.6, 0.3],   // theme dark

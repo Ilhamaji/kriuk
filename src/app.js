@@ -40,9 +40,9 @@ const TEXT = {
     spk_default: 'Default speaker (System)',
     off: 'Off',
     test_note: 'Check your level ·',
-    test_idle: 'Not recording',
-    test_live: 'Listening…',
-    test_start: 'Test mic',
+    test_idle: 'Mic off',
+    test_live: 'Mic live',
+    test_start: 'Start',
     test_stop: 'Stop',
     activity_title: 'This session',
     activity_sub: 'Temporary test history, no audio stored.',
@@ -51,6 +51,10 @@ const TEXT = {
     settings_title: 'Kriuk preferences',
     focus: 'Automatic focus mode',
     focus_sub: 'Simulated for this session.',
+    start_windows: 'Start with Windows',
+    start_windows_sub: 'Open Kriuk in the tray when you sign in.',
+    close_tray: 'Close to tray',
+    close_tray_sub: 'Keep the chain running when the window closes.',
     language: 'Language',
     theme: 'Appearance',
     theme_light: 'Light',
@@ -58,7 +62,7 @@ const TEXT = {
     about_title: 'About Kriuk',
     about_body:
       'Everything runs on your device: echo cancellation, RNNoise 48 kHz, then the equalizer. Turn on <em>Send result to</em> to play the result on a speaker — or a virtual audio cable, so other apps get the cleaned sound.',
-    hint: 'Click outside the panel or press Escape to hide it. Click the Kriuk tray icon to bring it back.',
+    hint: 'Click outside the panel to hide it. Processing keeps running in the tray — click the icon to come back.',
     footer_privacy: 'On-device privacy',
     footer_local: 'Local preview',
   },
@@ -92,10 +96,10 @@ const TEXT = {
     spk_default: 'Speaker default (Sistem)',
     off: 'Nonaktif',
     test_note: 'Cek level suara ·',
-    test_idle: 'Tidak direkam',
-    test_live: 'Mendengarkan…',
-    test_start: 'Tes mic',
-    test_stop: 'Berhenti',
+    test_idle: 'Mic mati',
+    test_live: 'Mic aktif',
+    test_start: 'Mulai',
+    test_stop: 'Hentikan',
     activity_title: 'Aktivitas sesi ini',
     activity_sub: 'Riwayat tes sementara, tanpa penyimpanan audio.',
     activity_empty: 'Belum ada tes mikrofon.',
@@ -103,6 +107,10 @@ const TEXT = {
     settings_title: 'Preferensi Kriuk',
     focus: 'Mode fokus otomatis',
     focus_sub: 'Simulasi untuk sesi ini.',
+    start_windows: 'Mulai dengan Windows',
+    start_windows_sub: 'Buka Kriuk di tray saat kamu masuk.',
+    close_tray: 'Tutup ke tray',
+    close_tray_sub: 'Rantai audio tetap jalan saat jendela ditutup.',
     language: 'Bahasa',
     theme: 'Tampilan',
     theme_light: 'Terang',
@@ -110,7 +118,7 @@ const TEXT = {
     about_title: 'Tentang Kriuk',
     about_body:
       'Semua diproses di perangkatmu: echo cancellation, RNNoise 48 kHz, lalu equalizer. Nyalakan <em>Kirim hasil ke</em> untuk memutar hasilnya ke speaker — atau ke kabel audio virtual, supaya aplikasi lain memakai suara yang sudah bersih.',
-    hint: 'Klik di luar panel atau tekan Escape untuk menyembunyikan. Klik ikon Kriuk di tray untuk membuka kembali.',
+    hint: 'Klik di luar panel untuk menyembunyikan. Pemrosesan tetap jalan di tray — klik ikonnya untuk kembali.',
     footer_privacy: 'Privasi di perangkatmu',
     footer_local: 'Preview lokal',
   },
@@ -118,6 +126,9 @@ const TEXT = {
 
 const LANG_KEY = 'kriuk.lang';
 const THEME_KEY = 'kriuk.theme';
+const MIC_KEY = 'kriuk.mic';
+const SPK_KEY = 'kriuk.spk';
+const CHAIN_KEY = 'kriuk.chain';
 let lang = localStorage.getItem(LANG_KEY) === 'id' ? 'id' : 'en';
 const savedTheme = localStorage.getItem(THEME_KEY);
 let theme =
@@ -262,11 +273,20 @@ function paintLevel(rms) {
   bars.forEach((b, i) => b.classList.toggle('on', i < lit));
 }
 
+/** Chain state outlives the process: the next launch can come back listening. */
+function saveChain() {
+  localStorage.setItem(
+    CHAIN_KEY,
+    JSON.stringify({ on: testing, spk: state.spk, aec: state.aec })
+  );
+}
+
 function setTesting(on) {
   testing = on;
   $('#mic-test').classList.toggle('is-live', on);
   if (!on) bars.forEach((b) => b.classList.remove('on'));
   renderStatus();
+  saveChain();
 }
 
 listen('kriuk://level', (event) => {
@@ -364,11 +384,13 @@ function spkLabel() {
 bindToggle('#spk-toggle', 'spk', (on) => {
   spkNotice = '';
   renderStatus();
+  saveChain();
   invoke('set_monitor', { on }).catch(() => {});
   if (on && !testing) startTest(); // routing only exists while the mic chain runs
 });
 
 $('#spk-device').addEventListener('change', () => {
+  localStorage.setItem(SPK_KEY, $('#spk-device').value);
   invoke('set_output', { device: spkLabel() || null }).catch(() => {});
   if (state.spk) renderStatus();
 });
@@ -377,6 +399,7 @@ $('#spk-device').addEventListener('change', () => {
 bindToggle('#echo-toggle', 'aec', (on) => {
   aecNotice = '';
   renderStatus();
+  saveChain();
   invoke('set_aec', { on }).catch(() => {});
   if (on && !testing) startTest(); // the reference comes from the running chain
 });
@@ -388,6 +411,7 @@ listen('kriuk://aec-error', (event) => {
   $('#echo-toggle').classList.remove('is-on');
   $('#echo-toggle').setAttribute('aria-checked', 'false');
   renderStatus();
+  saveChain();
 });
 
 listen('kriuk://monitor', (event) => {
@@ -428,12 +452,15 @@ async function listDevices() {
     names = devices.filter((d) => d.kind === 'audioinput').map((d) => d.label || 'Microphone');
   }
   const select = $('#mic-device');
-  const keep = select.selectedIndex > 0 ? select.value : '';
+  const keep = select.selectedIndex > 0 ? select.value : localStorage.getItem(MIC_KEY) || '';
   select.length = 1; // keep the "default" option from the markup
   names.forEach((name) => select.add(new Option(name, name)));
   select.selectedIndex = names.includes(keep) ? names.indexOf(keep) + 1 : 0;
 }
-listDevices();
+
+$('#mic-device').addEventListener('change', () =>
+  localStorage.setItem(MIC_KEY, $('#mic-device').value)
+);
 
 async function listOutputs() {
   let names = [];
@@ -443,12 +470,39 @@ async function listOutputs() {
     return;
   }
   const select = $('#spk-device');
-  const keep = select.selectedIndex > 0 ? select.value : '';
+  const keep = select.selectedIndex > 0 ? select.value : localStorage.getItem(SPK_KEY) || '';
   select.length = 1; // keep the "default" option from the markup
   names.forEach((name) => select.add(new Option(name, name)));
   select.selectedIndex = names.includes(keep) ? names.indexOf(keep) + 1 : 0;
 }
-listOutputs();
+
+/**
+ * The chain was live when the app last quit: bring it back before the user
+ * joins a call, using the devices it remembered. Runs after both lists exist.
+ */
+async function restoreChain() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem(CHAIN_KEY) || '{}');
+  } catch {
+    return;
+  }
+  if (!tauri || !saved.on) return;
+  for (const [key, sel] of [
+    ['spk', '#spk-toggle'],
+    ['aec', '#echo-toggle'],
+  ]) {
+    if (!saved[key]) continue;
+    state[key] = true;
+    $(sel).classList.add('is-on');
+    $(sel).setAttribute('aria-checked', 'true');
+  }
+  invoke('set_output', { device: spkLabel() || null }).catch(() => {});
+  renderStatus();
+  await startTest();
+}
+
+Promise.all([listDevices(), listOutputs()]).then(restoreChain);
 
 // Windows only re-enumerates on request: pick up mics enabled in Control Panel
 // without restarting, by refreshing whenever the popover is shown or regains focus.
@@ -456,11 +510,44 @@ window.addEventListener('focus', () => {
   listDevices();
   listOutputs();
 });
-listen('kriuk://shown', () => {
+listen('kriuk://shown', async () => {
   listDevices();
   listOutputs();
-  // Hiding the panel closes the mic; resume routing and echo when it comes back.
-  if ((state.spk || state.aec) && !testing) startTest();
+  // The chain keeps running while the panel is hidden, so trust Rust over the UI's memory.
+  if (!testing && (await invoke('meter_active').catch(() => false))) setTesting(true);
+});
+
+/* ---------- system ---------- */
+const CLOSE_KEY = 'kriuk.closeToTray';
+let closeToTray = localStorage.getItem(CLOSE_KEY) !== 'off';
+
+function paintSwitch(el, on) {
+  el.classList.toggle('is-on', on);
+  el.setAttribute('aria-checked', String(on));
+}
+
+const closeEl = $('#close-toggle');
+paintSwitch(closeEl, closeToTray);
+invoke('set_close_to_tray', { on: closeToTray }).catch(() => {});
+closeEl.addEventListener('click', () => {
+  closeToTray = !closeToTray;
+  paintSwitch(closeEl, closeToTray);
+  localStorage.setItem(CLOSE_KEY, closeToTray ? 'on' : 'off');
+  invoke('set_close_to_tray', { on: closeToTray }).catch(() => {});
+});
+
+// The registry is the source of truth: the entry may have been removed elsewhere.
+const autoEl = $('#autostart-toggle');
+invoke('get_autostart').then((on) => paintSwitch(autoEl, !!on)).catch(() => {});
+autoEl.addEventListener('click', async () => {
+  const want = !autoEl.classList.contains('is-on');
+  paintSwitch(autoEl, want);
+  try {
+    await invoke('set_autostart', { on: want });
+  } catch (err) {
+    console.warn('autostart failed:', err);
+    paintSwitch(autoEl, !want);
+  }
 });
 
 /* ---------- window ---------- */

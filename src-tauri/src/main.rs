@@ -783,6 +783,9 @@ impl Panel {
         window.focus_window();
 
         let ctx = egui::Context::default();
+        // Fonts are rebuilt at the start of a frame, so they have to be set before
+        // the first one; asking for them inside draw panics on an unknown family.
+        ui::install_fonts(&ctx);
         let state = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,

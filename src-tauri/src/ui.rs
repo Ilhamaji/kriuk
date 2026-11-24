@@ -1,8 +1,11 @@
-//! The popover, drawn with egui. No webview: the whole panel is a few hundred
-//! rectangles and a text layout, so the process stays small and starts at once.
+//! The popover, drawn with egui. Every number here comes from `src/styles.css`,
+//! the stylesheet the WebView2 build shipped, so the two look the same.
 
 use crate::State;
-use egui::{Align2, Color32, FontId, Id, Rect, Rounding, Sense, Stroke, Vec2};
+use egui::{
+    Align2, Color32, FontData, FontDefinitions, FontFamily, FontId, Id, Rect, Rounding, Sense,
+    Stroke, Vec2,
+};
 
 pub enum Action {
     Tab(u8),
@@ -36,13 +39,13 @@ struct Pal {
     muted: Color32,
     line: Color32,
     border: Color32,
-    border_strong: Color32,
     track: Color32,
     off: Color32,
     knob: Color32,
     meter_off: Color32,
     banner_off: Color32,
     banner_off_fg: Color32,
+    accent_soft: Color32,
 }
 
 fn c(rgb: u32) -> Color32 {
@@ -65,13 +68,13 @@ fn pal(dark: bool) -> Pal {
             muted: c(0xA6A099),
             line: c(0x302E29),
             border: c(0x36332E),
-            border_strong: c(0x45413A),
             track: c(0x262420),
             off: c(0x4A463F),
             knob: c(0xF0EDE7),
             meter_off: c(0x3D3A34),
             banner_off: c(0x2C2520),
             banner_off_fg: c(0xD2A184),
+            accent_soft: c(0x6B4230),
         }
     } else {
         Pal {
@@ -88,13 +91,13 @@ fn pal(dark: bool) -> Pal {
             muted: c(0x6E6A65),
             line: c(0xE8E4DC),
             border: c(0xE6E2DA),
-            border_strong: c(0xD7D2C8),
             track: c(0xF1EEE7),
             off: c(0xDDD8CF),
             knob: c(0xFFFFFF),
             meter_off: c(0xDED9CF),
             banner_off: c(0xF6EFEA),
             banner_off_fg: c(0xB07A5E),
+            accent_soft: c(0xE7CDBE),
         }
     }
 }
@@ -103,7 +106,6 @@ fn t(id: bool, key: &str) -> &'static str {
     if id {
         match key {
             "badge" => "Personal",
-            "hide" => "Sembunyikan",
             "tab_audio" => "Audio",
             "tab_activity" => "Aktivitas",
             "tab_settings" => "Setelan",
@@ -151,6 +153,7 @@ fn t(id: bool, key: &str) -> &'static str {
             "about_body" => "Semua diproses di perangkatmu: echo cancellation, RNNoise 48 kHz, lalu equalizer. Nyalakan Kirim hasil ke untuk memutar hasilnya ke speaker — atau ke kabel audio virtual, supaya aplikasi lain memakai suara yang sudah bersih.",
             "hint" => "Klik di luar panel untuk menyembunyikan. Pemrosesan tetap jalan di tray — klik ikonnya untuk kembali.",
             "footer_privacy" => "Privasi di perangkatmu",
+            "footer_local" => "Pratinjau lokal",
             "notice_same_box" => "Mic ada di perangkat ini",
             "notice_aec" => "Butuh output berbeda",
             _ => "",
@@ -158,7 +161,6 @@ fn t(id: bool, key: &str) -> &'static str {
     } else {
         match key {
             "badge" => "Personal",
-            "hide" => "Hide",
             "tab_audio" => "Audio",
             "tab_activity" => "Activity",
             "tab_settings" => "Settings",
@@ -206,6 +208,7 @@ fn t(id: bool, key: &str) -> &'static str {
             "about_body" => "Everything runs on your device: echo cancellation, RNNoise 48 kHz, then the equalizer. Turn on Send result to to play the result on a speaker — or a virtual audio cable, so other apps get the cleaned sound.",
             "hint" => "Click outside the panel to hide it. Processing keeps running in the tray — click the icon to come back.",
             "footer_privacy" => "On-device privacy",
+            "footer_local" => "Local preview",
             "notice_same_box" => "The mic is on this device",
             "notice_aec" => "Needs a different output",
             _ => "",
@@ -217,54 +220,104 @@ fn tr(id: bool, key: &str) -> String {
     t(id, key).to_string()
 }
 
+/// Segoe UI, like the webview used: the default egui font is noticeably wider.
+pub fn install_fonts(ctx: &egui::Context) {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let mut fonts = FontDefinitions::default();
+        if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
+            fonts
+                .font_data
+                .insert("segoe".to_owned(), FontData::from_owned(bytes));
+            if let Some(list) = fonts.families.get_mut(&FontFamily::Proportional) {
+                list.insert(0, "segoe".to_owned());
+            }
+        }
+        for (name, file) in [("sb", "seguisb.ttf"), ("b", "segoeuib.ttf")] {
+            let family = FontFamily::Name(name.into());
+            match std::fs::read(format!("C:\\Windows\\Fonts\\{file}")) {
+                Ok(bytes) => {
+                    fonts
+                        .font_data
+                        .insert(name.to_owned(), FontData::from_owned(bytes));
+                    fonts.families.insert(family, vec![name.to_owned()]);
+                }
+                Err(_) => {
+                    let fallback = fonts.families[&FontFamily::Proportional].clone();
+                    fonts.families.insert(family, fallback);
+                }
+            }
+        }
+        ctx.set_fonts(fonts);
+    });
+}
+
+fn f(size: f32) -> FontId {
+    FontId::proportional(size)
+}
+
+fn sb(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("sb".into()))
+}
+
+fn b(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name("b".into()))
+}
+
 pub fn draw(ctx: &egui::Context, st: &mut State) -> Vec<Action> {
     let p = pal(st.dark);
     let mut out = Vec::new();
+    // egui adds its own gap between every widget; the CSS used explicit margins,
+    // so drop it and let the numbers below be the only spacing.
+    ctx.style_mut(|s| s.spacing.item_spacing = Vec2::ZERO);
     let full = ctx.screen_rect();
+    // The body leaves 10 px under the panel for the caret that points at the tray.
+    let panel = Rect::from_min_max(full.min, egui::pos2(full.right(), full.bottom() - 10.0));
     let bg = ctx.layer_painter(egui::LayerId::background());
-    bg.rect_filled(full, Rounding::same(16.0), p.canvas);
-    bg.rect_stroke(full, Rounding::same(16.0), Stroke::new(1.0_f32, p.border));
+    bg.rect_filled(panel, Rounding::same(16.0), p.canvas);
+    bg.rect_stroke(panel, Rounding::same(16.0), Stroke::new(1.0_f32, p.border));
+    caret(&bg, &p, panel);
 
     egui::TopBottomPanel::top("head")
-        .frame(
-            egui::Frame::none().inner_margin(egui::Margin {
-                left: 18.0,
-                right: 16.0,
-                top: 0.0,
-                bottom: 0.0,
-            }),
-        )
+        .show_separator_line(false)
+        .frame(egui::Frame::none().inner_margin(egui::Margin {
+            left: 18.0,
+            right: 16.0,
+            top: 0.0,
+            bottom: 0.0,
+        }))
         .exact_height(60.0)
         .show(ctx, |ui| header(ui, &p, st, &mut out));
 
     egui::TopBottomPanel::top("tabs")
+        .show_separator_line(false)
         .frame(egui::Frame::none().inner_margin(egui::Margin {
             left: 8.0,
             right: 8.0,
             top: 0.0,
             bottom: 0.0,
         }))
-        .exact_height(40.0)
+        .exact_height(44.0)
         .show(ctx, |ui| tabs(ui, &p, st, &mut out));
 
     egui::TopBottomPanel::bottom("foot")
-        .frame(
-            egui::Frame::none().inner_margin(egui::Margin {
-                left: 20.0,
-                right: 20.0,
-                top: 0.0,
-                bottom: 0.0,
-            }),
-        )
-        .exact_height(38.0)
+        .show_separator_line(false)
+        .frame(egui::Frame::none().inner_margin(egui::Margin {
+            left: 18.0,
+            right: 18.0,
+            top: 0.0,
+            bottom: 10.0,
+        }))
+        .exact_height(54.0)
         .show(ctx, |ui| footer(ui, &p, st));
 
     egui::CentralPanel::default()
         .frame(egui::Frame::none().inner_margin(egui::Margin {
             left: 20.0,
             right: 20.0,
-            top: 4.0,
-            bottom: 0.0,
+            top: 16.0,
+            bottom: 8.0,
         }))
         .show(ctx, |ui| {
             egui::ScrollArea::vertical()
@@ -280,20 +333,43 @@ pub fn draw(ctx: &egui::Context, st: &mut State) -> Vec<Action> {
     out
 }
 
+/// The little diamond under the panel: a 16 px square rotated 45°, like the CSS.
+fn caret(painter: &egui::Painter, p: &Pal, panel: Rect) {
+    let cx = panel.center().x;
+    let y = panel.bottom();
+    let d = 8.0 * std::f32::consts::SQRT_2;
+    let tip = egui::pos2(cx, y + d);
+    painter.add(egui::Shape::convex_polygon(
+        vec![egui::pos2(cx - d, y), tip, egui::pos2(cx + d, y)],
+        p.canvas,
+        Stroke::NONE,
+    ));
+    let stroke = Stroke::new(1.0_f32, p.border);
+    painter.line_segment([egui::pos2(cx - d, y), tip], stroke);
+    painter.line_segment([tip, egui::pos2(cx + d, y)], stroke);
+}
+
 fn header(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     let r = ui.max_rect();
     let painter = ui.painter().clone();
+
+    // Logo: 30x26 viewBox at 26x22, five rounded bars.
+    let k = 22.0 / 26.0;
     let bars = [8.0f32, 16.0, 24.0, 14.0, 6.0];
     for (i, h) in bars.iter().enumerate() {
-        let x = r.left() + 1.5 + i as f32 * 6.0;
+        let x = r.left() + 1.5 * k + i as f32 * 6.0 * k;
         painter.rect_filled(
-            Rect::from_center_size(egui::pos2(x, r.center().y), Vec2::new(3.0, *h)),
-            Rounding::same(1.5),
+            Rect::from_center_size(
+                egui::pos2(x, r.center().y),
+                Vec2::new(3.0 * k, h * k),
+            ),
+            Rounding::same(1.5 * k),
             p.accent,
         );
     }
-    let word = painter.layout_no_wrap("kriuk".to_owned(), FontId::proportional(22.0), p.ink);
-    let left = r.left() + 34.0;
+
+    let left = r.left() + 26.0 + 9.0;
+    let word = painter.layout_no_wrap("kriuk".to_owned(), b(22.0), p.ink);
     let w = word.size().x;
     painter.galley(
         egui::pos2(left, r.center().y - word.size().y / 2.0),
@@ -304,27 +380,29 @@ fn header(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
         egui::pos2(left + w + 1.0, r.center().y + 5.0),
         Align2::LEFT_CENTER,
         ".",
-        FontId::proportional(22.0),
+        b(22.0),
         p.accent,
     );
 
     let hide = Rect::from_center_size(egui::pos2(r.right() - 13.0, r.center().y), Vec2::splat(26.0));
+    let badge_text = painter.layout_no_wrap(t(st.lang_id, "badge").to_owned(), sb(12.0), p.muted);
     let badge = Rect::from_min_size(
-        egui::pos2(hide.left() - 8.0 - 62.0, r.center().y - 11.0),
-        Vec2::new(62.0, 22.0),
+        egui::pos2(
+            hide.left() - 8.0 - badge_text.size().x - 20.0,
+            r.center().y - 11.0,
+        ),
+        Vec2::new(badge_text.size().x + 20.0, 22.0),
     );
-    painter.rect_filled(badge, Rounding::same(8.0), p.surface);
-    painter.text(
-        badge.center(),
-        Align2::CENTER_CENTER,
-        t(st.lang_id, "badge"),
-        FontId::proportional(12.0),
+    painter.rect_filled(badge, Rounding::same(8.0), p.track);
+    painter.galley(
+        egui::pos2(badge.center().x - badge_text.size().x / 2.0, badge.center().y - badge_text.size().y / 2.0),
+        badge_text,
         p.muted,
     );
 
     let resp = ui.interact(hide, ui.id().with("hide"), Sense::click());
     if resp.hovered() {
-        painter.rect_filled(hide, Rounding::same(8.0), p.surface);
+        painter.rect_filled(hide, Rounding::same(7.0), p.surface);
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     painter.line_segment(
@@ -332,7 +410,7 @@ fn header(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
             egui::pos2(hide.center().x - 5.0, hide.center().y),
             egui::pos2(hide.center().x + 5.0, hide.center().y),
         ],
-        Stroke::new(1.6_f32, p.muted),
+        Stroke::new(1.6_f32, if resp.hovered() { p.ink } else { p.muted }),
     );
     if resp.clicked() {
         out.push(Action::Hide);
@@ -345,24 +423,50 @@ fn tabs(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     let names = ["tab_audio", "tab_activity", "tab_settings"];
     let w = r.width() / 3.0;
     for (i, key) in names.iter().enumerate() {
-        let seg = Rect::from_min_size(egui::pos2(r.left() + i as f32 * w, r.top()), Vec2::new(w, r.height()));
+        let seg = Rect::from_min_size(
+            egui::pos2(r.left() + i as f32 * w, r.top()),
+            Vec2::new(w, r.height()),
+        );
         let on = st.tab as usize == i;
         let resp = ui.interact(seg, ui.id().with(("tab", i)), Sense::click());
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         }
-        painter.text(
-            egui::pos2(seg.center().x, seg.center().y - 3.0),
-            Align2::CENTER_CENTER,
-            t(st.lang_id, key),
-            FontId::proportional(14.0),
-            if on { p.accent } else { p.muted },
+        let color = if on {
+            p.accent
+        } else if resp.hovered() {
+            p.ink
+        } else {
+            p.muted
+        };
+        let label = painter.layout_no_wrap(
+            t(st.lang_id, key).to_owned(),
+            if on { sb(14.0) } else { f(14.0) },
+            color,
+        );
+        let gap = 7.0;
+        let icon_w = 17.0;
+        let total = icon_w + gap + label.size().x;
+        let start = seg.center().x - total / 2.0;
+        let mid = egui::pos2(start + icon_w / 2.0, seg.center().y);
+        match i {
+            0 => icon_audio(&painter, mid, 17.0, color),
+            1 => icon_activity(&painter, mid, 17.0, color),
+            _ => icon_settings(&painter, mid, 17.0, color),
+        }
+        painter.galley(
+            egui::pos2(
+                start + icon_w + gap,
+                seg.center().y - label.size().y / 2.0,
+            ),
+            label,
+            color,
         );
         if on {
             painter.rect_filled(
-                Rect::from_center_size(
-                    egui::pos2(seg.center().x, r.bottom() - 3.0),
-                    Vec2::new(44.0, 2.0),
+                Rect::from_min_max(
+                    egui::pos2(seg.left() + 12.0, r.bottom() - 2.5),
+                    egui::pos2(seg.right() - 12.0, r.bottom() + 0.5),
                 ),
                 Rounding::same(2.0),
                 p.accent,
@@ -373,7 +477,10 @@ fn tabs(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
         }
     }
     painter.line_segment(
-        [egui::pos2(r.left(), r.bottom() - 0.5), egui::pos2(r.right(), r.bottom() - 0.5)],
+        [
+            egui::pos2(r.left() - 8.0, r.bottom() - 0.5),
+            egui::pos2(r.right() + 8.0, r.bottom() - 0.5),
+        ],
         Stroke::new(1.0_f32, p.line),
     );
 }
@@ -382,33 +489,34 @@ fn footer(ui: &mut egui::Ui, p: &Pal, st: &mut State) {
     let r = ui.max_rect();
     let painter = ui.painter().clone();
     painter.line_segment(
-        [egui::pos2(r.left(), r.top() + 0.5), egui::pos2(r.right(), r.top() + 0.5)],
+        [
+            egui::pos2(r.left() - 18.0, r.top() + 0.5),
+            egui::pos2(r.right() + 18.0, r.top() + 0.5),
+        ],
         Stroke::new(1.0_f32, p.line),
     );
-    let c = egui::pos2(r.left() + 6.0, r.center().y);
-    shield(&painter, c, 13.0, p.muted);
+    shield(&painter, egui::pos2(r.left() + 7.0, r.center().y), 14.0, p.muted);
     painter.text(
-        egui::pos2(r.left() + 18.0, r.center().y),
+        egui::pos2(r.left() + 21.0, r.center().y),
         Align2::LEFT_CENTER,
         t(st.lang_id, "footer_privacy"),
-        FontId::proportional(11.5),
+        f(12.5),
         p.muted,
     );
     painter.text(
         egui::pos2(r.right(), r.center().y),
         Align2::RIGHT_CENTER,
-        concat!("v", env!("CARGO_PKG_VERSION")),
-        FontId::proportional(11.5),
+        t(st.lang_id, "footer_local"),
+        sb(12.5),
         p.muted,
     );
 }
 
 fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     let id = st.lang_id;
-    ui.add_space(10.0);
     banner(ui, p, st);
+    ui.add_space(16.0);
 
-    ui.add_space(14.0);
     if row(
         ui,
         p,
@@ -416,12 +524,10 @@ fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
         &tr(id, "mic"),
         &tr(id, if st.denoise { "mic_on" } else { "mic_off" }),
         st.denoise,
-        40.0,
         "mic",
     ) {
         out.push(Action::Denoise(!st.denoise));
     }
-    ui.add_space(8.0);
 
     let mut mics = vec![tr(id, "mic_default")];
     mics.extend(st.devices.iter().cloned());
@@ -434,48 +540,60 @@ fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
         out.push(Action::Mic(if pick == 0 { None } else { Some(mics[pick].clone()) }));
     }
 
-    ui.add_space(14.0);
+    ui.add_space(12.0);
     label_row(ui, p, t(id, "reduction"), t(id, &format!("red_{}", st.reduction)));
     ui.add_space(8.0);
     let labels = [t(id, "red_0"), t(id, "red_1"), t(id, "red_2")];
-    if let Some(i) = segmented(ui, p, "red", &labels, st.reduction as usize) {
+    if let Some(i) = segmented(ui, p, "red", &labels, st.reduction as usize, false) {
         out.push(Action::Reduction(i as u8));
     }
 
-    ui.add_space(14.0);
+    ui.add_space(4.0);
     label_row(ui, p, t(id, "eq"), t(id, &format!("eq_{}", st.eq)));
     ui.add_space(8.0);
     let labels = [t(id, "eq_0"), t(id, "eq_1"), t(id, "eq_2"), t(id, "eq_3")];
-    if let Some(i) = segmented(ui, p, "eq", &labels, st.eq as usize) {
+    if let Some(i) = segmented(ui, p, "eq", &labels, st.eq as usize, true) {
         out.push(Action::Eq(i as u8));
     }
 
-    ui.add_space(10.0);
+    ui.add_space(4.0);
     let echo_sub = match st.notice {
         Some("aec_same") => tr(id, "notice_aec"),
         _ if st.aec_on => tr(id, "echo_on"),
         _ => tr(id, "off"),
     };
-    if row(ui, p, Icon::Shield, &tr(id, "echo"), &echo_sub, st.aec_on, 40.0, "echo") {
+    if row(
+        ui,
+        p,
+        Icon::Shield,
+        &tr(id, "echo"),
+        &echo_sub,
+        st.aec_on,
+        "echo",
+    ) {
         out.push(Action::Aec(!st.aec_on));
     }
 
-    ui.add_space(6.0);
+    ui.add_space(2.0);
     divider(ui, p);
     ui.add_space(10.0);
 
     let spk_sub = match st.notice {
         Some("same_box") => tr(id, "notice_same_box"),
-        _ if st.spk_on => st
-            .spk
-            .clone()
-            .unwrap_or_else(|| tr(id, "spk_default")),
+        _ if st.spk_on => st.spk.clone().unwrap_or_else(|| tr(id, "spk_default")),
         _ => tr(id, "off"),
     };
-    if row(ui, p, Icon::Speaker, &tr(id, "send"), &spk_sub, st.spk_on, 40.0, "spk") {
+    if row(
+        ui,
+        p,
+        Icon::Speaker,
+        &tr(id, "send"),
+        &spk_sub,
+        st.spk_on,
+        "spk",
+    ) {
         out.push(Action::Spk(!st.spk_on));
     }
-    ui.add_space(8.0);
 
     let mut outs = vec![tr(id, "spk_default")];
     outs.extend(st.outputs.iter().cloned());
@@ -492,112 +610,87 @@ fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
         }));
     }
 
-    ui.add_space(14.0);
+    ui.add_space(12.0);
     meter_card(ui, p, st, out);
-    ui.add_space(6.0);
 
-    let state_text = tr(id, if st.listening { "test_live" } else { "test_idle" });
-    let note = format!("{} {}", t(id, "test_note"), state_text);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
-    ui.painter().text(
-        egui::pos2(rect.left() + 2.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        note,
-        FontId::proportional(11.5),
-        p.muted,
-    );
     if let Some(err) = &st.err {
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
         ui.painter().text(
-            egui::pos2(rect.left() + 2.0, rect.center().y),
+            egui::pos2(rect.left(), rect.center().y),
             Align2::LEFT_CENTER,
             err,
-            FontId::proportional(11.5),
+            f(12.0),
             p.accent,
         );
     }
-    ui.add_space(14.0);
 }
 
 fn activity(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     let id = st.lang_id;
-    ui.add_space(12.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
-    ui.painter().text(
-        egui::pos2(rect.left(), rect.center().y),
-        Align2::LEFT_CENTER,
-        t(id, "activity_title"),
-        FontId::proportional(18.0),
-        p.ink,
-    );
+    ui.add_space(2.0);
+    view_title(ui, p, t(id, "activity_title"));
     ui.add_space(4.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
-    ui.painter().text(
-        egui::pos2(rect.left(), rect.center().y),
-        Align2::LEFT_CENTER,
-        t(id, "activity_sub"),
-        FontId::proportional(12.5),
-        p.muted,
-    );
-    ui.add_space(18.0);
+    view_sub(ui, p, t(id, "activity_sub"));
+    ui.add_space(4.0);
 
     if st.tests.is_empty() {
-        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+        ui.add_space(36.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
+        waveform(&ui.painter().clone(), rect.center(), 42.0, p.muted);
+        ui.add_space(10.0);
+        let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
         ui.painter().text(
             rect.center(),
             Align2::CENTER_CENTER,
             t(id, "activity_empty"),
-            FontId::proportional(13.0),
+            f(13.5),
             p.muted,
         );
-        ui.add_space(12.0);
-        if button(ui, p, t(id, "activity_goto"), true) {
+        ui.add_space(10.0);
+        let (rect, resp) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 36.0), Sense::click());
+        let painter = ui.painter().clone();
+        let w = ui.painter().layout_no_wrap(t(id, "activity_goto").to_owned(), sb(13.5), p.ink).size().x + 36.0;
+        let btn = Rect::from_center_size(rect.center(), Vec2::new(w, 36.0));
+        painter.rect_filled(btn, Rounding::same(9.0), p.white);
+        painter.rect_stroke(btn, Rounding::same(9.0), Stroke::new(1.0_f32, p.border));
+        painter.text(btn.center(), Align2::CENTER_CENTER, t(id, "activity_goto"), sb(13.5), p.ink);
+        if resp.hovered() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if resp.clicked() {
             out.push(Action::Tab(0));
         }
     } else {
-        for (i, peak) in st.tests.iter().enumerate().rev() {
-            let (rect, _) =
-                ui.allocate_exact_size(Vec2::new(ui.available_width(), 40.0), Sense::hover());
+        ui.add_space(10.0);
+        for peak in st.tests.iter().rev() {
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::hover());
             let painter = ui.painter().clone();
-            painter.line_segment(
-                [
-                    egui::pos2(rect.left(), rect.bottom()),
-                    egui::pos2(rect.right(), rect.bottom()),
-                ],
-                Stroke::new(1.0_f32, p.line),
-            );
+            painter.rect_filled(rect, Rounding::same(10.0), p.surface);
             painter.text(
-                egui::pos2(rect.left() + 2.0, rect.center().y - 8.0),
+                egui::pos2(rect.left() + 12.0, rect.center().y),
                 Align2::LEFT_CENTER,
-                format!("Mic test {}", i + 1),
-                FontId::proportional(13.0),
+                "Mic test",
+                f(13.0),
                 p.ink,
             );
             painter.text(
-                egui::pos2(rect.left() + 2.0, rect.center().y + 9.0),
-                Align2::LEFT_CENTER,
-                format!("peak {:.0} dB", peak),
-                FontId::proportional(12.0),
-                p.muted,
+                egui::pos2(rect.right() - 12.0, rect.center().y),
+                Align2::RIGHT_CENTER,
+                format!("{peak:.0} dB"),
+                sb(13.0),
+                p.accent,
             );
+            ui.add_space(8.0);
         }
     }
-    ui.add_space(14.0);
 }
 
 fn settings(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     let id = st.lang_id;
-    ui.add_space(12.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 26.0), Sense::hover());
-    ui.painter().text(
-        egui::pos2(rect.left(), rect.center().y),
-        Align2::LEFT_CENTER,
-        t(id, "settings_title"),
-        FontId::proportional(18.0),
-        p.ink,
-    );
-    ui.add_space(16.0);
+    ui.add_space(2.0);
+    view_title(ui, p, t(id, "settings_title"));
+    ui.add_space(10.0);
 
     if plain_row(ui, p, &tr(id, "start_windows"), &tr(id, "start_windows_sub"), st.autostart, "auto") {
         out.push(Action::Autostart(!st.autostart));
@@ -606,52 +699,71 @@ fn settings(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
         out.push(Action::CloseToTray(!st.close_to_tray));
     }
 
-    ui.add_space(8.0);
+    ui.add_space(6.0);
     label_row(ui, p, t(id, "language"), "");
     ui.add_space(8.0);
     let langs = ["English", "Bahasa Indonesia"];
-    if let Some(i) = segmented(ui, p, "lang", &langs, if st.lang_id { 1 } else { 0 }) {
+    if let Some(i) = segmented(ui, p, "lang", &langs, if st.lang_id { 1 } else { 0 }, false) {
         out.push(Action::Lang(i == 1));
     }
 
-    ui.add_space(14.0);
+    ui.add_space(16.0);
     label_row(ui, p, t(id, "theme"), "");
     ui.add_space(8.0);
     let themes = [t(id, "theme_light"), t(id, "theme_dark")];
-    if let Some(i) = segmented(ui, p, "theme", &themes, if st.dark { 1 } else { 0 }) {
+    if let Some(i) = segmented(ui, p, "theme", &themes, if st.dark { 1 } else { 0 }, false) {
         out.push(Action::Dark(i == 1));
     }
 
-    ui.add_space(16.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 96.0), Sense::hover());
-    ui.painter().rect_filled(rect, Rounding::same(12.0), p.surface);
-    let mut about = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect.shrink2(Vec2::new(14.0, 12.0)))
-            .layout(egui::Layout::top_down(egui::Align::LEFT)),
-    );
-    about.label(
-        egui::RichText::new(t(id, "about_title"))
-            .size(13.0)
-            .color(p.ink)
-            .strong(),
-    );
-    about.add_space(4.0);
-    about.label(
-        egui::RichText::new(t(id, "about_body"))
-            .size(12.0)
+    ui.add_space(18.0);
+    egui::Frame::none()
+        .fill(p.sage_bg)
+        .rounding(Rounding::same(12.0))
+        .inner_margin(egui::Margin {
+            left: 16.0,
+            right: 16.0,
+            top: 14.0,
+            bottom: 14.0,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(egui::RichText::new(t(id, "about_title")).font(sb(14.0)).color(p.ink));
+            ui.add_space(6.0);
+            ui.label(
+                egui::RichText::new(t(id, "about_body"))
+                    .font(f(13.0))
+                    .color(p.muted),
+            );
+        });
+
+    ui.add_space(18.0);
+    ui.label(
+        egui::RichText::new(t(id, "hint"))
+            .font(f(13.0))
             .color(p.muted),
     );
+}
 
-    ui.add_space(14.0);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 32.0), Sense::hover());
-    let mut hint = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::top_down(egui::Align::LEFT)),
+fn view_title(ui: &mut egui::Ui, p: &Pal, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+    ui.painter().text(
+        egui::pos2(rect.left(), rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        sb(15.0),
+        p.ink,
     );
-    hint.label(egui::RichText::new(t(id, "hint")).size(11.5).color(p.muted));
-    ui.add_space(14.0);
+}
+
+fn view_sub(ui: &mut egui::Ui, p: &Pal, text: &str) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 20.0), Sense::hover());
+    ui.painter().text(
+        egui::pos2(rect.left(), rect.center().y),
+        Align2::LEFT_CENTER,
+        text,
+        f(13.5),
+        p.muted,
+    );
 }
 
 #[derive(Clone, Copy)]
@@ -665,40 +777,39 @@ fn shield(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32
     let s = size / 2.0;
     let pts = vec![
         egui::pos2(center.x, center.y - s),
-        egui::pos2(center.x + s, center.y - s * 0.6),
-        egui::pos2(center.x + s, center.y + s * 0.15),
+        egui::pos2(center.x + s * 0.9, center.y - s * 0.62),
+        egui::pos2(center.x + s * 0.9, center.y + s * 0.1),
         egui::pos2(center.x, center.y + s),
-        egui::pos2(center.x - s, center.y + s * 0.15),
-        egui::pos2(center.x - s, center.y - s * 0.6),
+        egui::pos2(center.x - s * 0.9, center.y + s * 0.1),
+        egui::pos2(center.x - s * 0.9, center.y - s * 0.62),
     ];
-    painter.add(egui::Shape::convex_polygon(pts, Color32::TRANSPARENT, Stroke::new(1.2_f32, color)));
+    painter.add(egui::Shape::convex_polygon(
+        pts,
+        Color32::TRANSPARENT,
+        Stroke::new(1.3_f32, color),
+    ));
 }
 
 fn draw_icon(painter: &egui::Painter, center: egui::Pos2, icon: Icon, color: Color32) {
-    let stroke = Stroke::new(1.4_f32, color);
+    let stroke = Stroke::new(1.6_f32, color);
     match icon {
         Icon::Mic => {
             painter.rect_stroke(
-                Rect::from_center_size(
-                    egui::pos2(center.x, center.y - 2.0),
-                    Vec2::new(6.0, 10.0),
-                ),
-                Rounding::same(3.0),
+                Rect::from_center_size(egui::pos2(center.x, center.y - 2.2), Vec2::new(5.0, 9.0)),
+                Rounding::same(2.5),
                 stroke,
             );
+            let c = egui::pos2(center.x, center.y - 0.5);
+            painter.add(egui::Shape::line(
+                arc_points(c, 5.5, -0.2, std::f32::consts::PI + 0.2),
+                stroke,
+            ));
             painter.line_segment(
                 [
-                    egui::pos2(center.x - 4.5, center.y + 0.5),
-                    egui::pos2(center.x + 4.5, center.y + 0.5),
+                    egui::pos2(center.x, center.y + 5.0),
+                    egui::pos2(center.x, center.y + 7.0),
                 ],
-                Stroke::new(1.0_f32, color),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(center.x, center.y + 4.5),
-                    egui::pos2(center.x, center.y + 6.5),
-                ],
-                Stroke::new(1.2_f32, color),
+                stroke,
             );
         }
         Icon::Speaker => {
@@ -714,53 +825,131 @@ fn draw_icon(painter: &egui::Painter, center: egui::Pos2, icon: Icon, color: Col
                 color,
                 Stroke::NONE,
             ));
-            painter.line_segment(
-                [
-                    egui::pos2(center.x + 3.5, center.y - 3.0),
-                    egui::pos2(center.x + 5.5, center.y),
-                ],
-                Stroke::new(1.2_f32, color),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(center.x + 5.5, center.y),
-                    egui::pos2(center.x + 3.5, center.y + 3.0),
-                ],
-                Stroke::new(1.2_f32, color),
-            );
+            painter.add(egui::Shape::line(
+                arc_points(
+                    egui::pos2(center.x + 1.0, center.y),
+                    5.0,
+                    -std::f32::consts::FRAC_PI_3,
+                    std::f32::consts::FRAC_PI_3,
+                ),
+                Stroke::new(1.4_f32, color),
+            ));
         }
-        Icon::Shield => shield(painter, center, 13.0, color),
+        Icon::Shield => shield(painter, center, 17.0, color),
     }
+}
+
+/// Points along an arc, for the curved parts of the icons.
+fn arc_points(center: egui::Pos2, radius: f32, from: f32, to: f32) -> Vec<egui::Pos2> {
+    let steps = 12;
+    (0..=steps)
+        .map(|i| {
+            let a = from + (to - from) * i as f32 / steps as f32;
+            egui::pos2(center.x + radius * a.cos(), center.y + radius * a.sin())
+        })
+        .collect()
+}
+
+/// Tab glyphs, copied from the SVGs in `src/index.html`.
+fn icon_audio(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let k = size / 20.0;
+    let bars = [(2.0f32, 7.0f32, 6.0f32), (6.0, 4.0, 12.0), (10.0, 2.0, 16.0), (14.0, 5.0, 10.0)];
+    let origin = egui::pos2(center.x - size / 2.0, center.y - size / 2.0);
+    for (x, y, h) in bars {
+        painter.rect_filled(
+            Rect::from_min_size(
+                egui::pos2(origin.x + x * k, origin.y + y * k),
+                Vec2::new(1.8 * k, h * k),
+            ),
+            Rounding::same(0.9 * k),
+            color,
+        );
+    }
+}
+
+fn icon_activity(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let k = size / 20.0;
+    let origin = egui::pos2(center.x - size / 2.0, center.y - size / 2.0);
+    let p = |x: f32, y: f32| egui::pos2(origin.x + x * k, origin.y + y * k);
+    painter.add(egui::Shape::line(
+        vec![
+            p(2.0, 11.0),
+            p(5.0, 11.0),
+            p(7.2, 6.0),
+            p(10.2, 16.0),
+            p(12.8, 9.0),
+            p(14.4, 11.0),
+            p(18.0, 11.0),
+        ],
+        Stroke::new(1.6_f32, color),
+    ));
+}
+
+fn icon_settings(painter: &egui::Painter, center: egui::Pos2, size: f32, color: Color32) {
+    let k = size / 20.0;
+    let stroke = Stroke::new(1.6_f32, color);
+    painter.circle_stroke(center, 3.0 * k, stroke);
+    for i in 0..8 {
+        let a = std::f32::consts::FRAC_PI_2 * i as f32 / 2.0;
+        let (dx, dy) = (a.cos(), a.sin());
+        painter.line_segment(
+            [
+                egui::pos2(center.x + dx * 5.6 * k, center.y + dy * 5.6 * k),
+                egui::pos2(center.x + dx * 7.6 * k, center.y + dy * 7.6 * k),
+            ],
+            stroke,
+        );
+    }
+}
+
+fn waveform(painter: &egui::Painter, center: egui::Pos2, width: f32, color: Color32) {
+    let k = width / 40.0;
+    let origin = egui::pos2(center.x - width / 2.0, center.y - 12.0 * k);
+    let p = |x: f32, y: f32| egui::pos2(origin.x + x * k, origin.y + y * k);
+    painter.add(egui::Shape::line(
+        vec![
+            p(1.0, 13.0),
+            p(6.0, 13.0),
+            p(9.0, 5.0),
+            p(13.0, 21.0),
+            p(17.0, 9.0),
+            p(20.0, 15.0),
+            p(23.0, 12.0),
+            p(28.0, 12.0),
+        ],
+        Stroke::new(1.6_f32, color),
+    ));
 }
 
 fn banner(ui: &mut egui::Ui, p: &Pal, st: &mut State) {
     let on = st.denoise;
     let id = st.lang_id;
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 54.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 58.0), Sense::hover());
     let painter = ui.painter().clone();
     painter.rect_filled(
         rect,
         Rounding::same(12.0),
         if on { p.sage_bg } else { p.banner_off },
     );
-    let c = egui::pos2(rect.left() + 28.0, rect.center().y);
+    let c = egui::pos2(rect.left() + 14.0 + 15.0, rect.center().y);
     let fg = if on { p.sage_fg } else { p.banner_off_fg };
-    painter.circle_filled(c, 15.0, if on { p.sage_bg } else { p.banner_off });
-    painter.circle_stroke(c, 15.0, Stroke::new(1.0_f32, fg));
-    painter.line_segment([egui::pos2(c.x - 4.0, c.y), egui::pos2(c.x - 1.0, c.y + 3.0)], Stroke::new(1.8_f32, fg));
-    painter.line_segment([egui::pos2(c.x - 1.0, c.y + 3.0), egui::pos2(c.x + 4.5, c.y - 3.5)], Stroke::new(1.8_f32, fg));
+    painter.circle_filled(c, 15.0, if on { p.white } else { p.banner_off });
+    let check = Stroke::new(2.0_f32, fg);
+    painter.line_segment([egui::pos2(c.x - 4.0, c.y + 0.4), egui::pos2(c.x - 1.2, c.y + 3.2)], check);
+    painter.line_segment([egui::pos2(c.x - 1.2, c.y + 3.2), egui::pos2(c.x + 4.4, c.y - 3.0)], check);
+    let left = rect.left() + 14.0 + 30.0 + 12.0;
     painter.text(
-        egui::pos2(rect.left() + 52.0, rect.center().y - 8.0),
+        egui::pos2(left, rect.center().y - 9.0),
         Align2::LEFT_CENTER,
         t(id, if on { "banner_on_title" } else { "banner_off_title" }),
-        FontId::proportional(14.0),
+        sb(14.0),
         p.ink,
     );
     painter.text(
-        egui::pos2(rect.left() + 52.0, rect.center().y + 9.0),
+        egui::pos2(left, rect.center().y + 9.0),
         Align2::LEFT_CENTER,
         t(id, if on { "banner_on_sub" } else { "banner_off_sub" }),
-        FontId::proportional(12.5),
+        f(12.5),
         p.muted,
     );
 }
@@ -768,19 +957,22 @@ fn banner(ui: &mut egui::Ui, p: &Pal, st: &mut State) {
 fn divider(ui: &mut egui::Ui, p: &Pal) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 1.0), Sense::hover());
     ui.painter().line_segment(
-        [egui::pos2(rect.left(), rect.center().y), egui::pos2(rect.right(), rect.center().y)],
+        [
+            egui::pos2(rect.left(), rect.center().y),
+            egui::pos2(rect.right(), rect.center().y),
+        ],
         Stroke::new(1.0_f32, p.line),
     );
 }
 
 fn label_row(ui: &mut egui::Ui, p: &Pal, label: &str, value: &str) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 18.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 17.0), Sense::hover());
     let painter = ui.painter();
     painter.text(
         egui::pos2(rect.left(), rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(13.0),
+        f(13.0),
         p.muted,
     );
     if !value.is_empty() {
@@ -788,7 +980,7 @@ fn label_row(ui: &mut egui::Ui, p: &Pal, label: &str, value: &str) {
             egui::pos2(rect.right(), rect.center().y),
             Align2::RIGHT_CENTER,
             value,
-            FontId::proportional(13.0),
+            sb(13.0),
             p.accent,
         );
     }
@@ -798,17 +990,18 @@ fn toggle_at(ui: &mut egui::Ui, p: &Pal, rect: Rect, on: bool, id: Id) -> bool {
     let resp = ui.interact(rect, id, Sense::click());
     let t = ui.ctx().animate_bool(id, on);
     let bg = if on { p.accent } else { p.off };
-    ui.painter().rect_filled(rect, Rounding::same(rect.height() / 2.0), bg);
+    ui.painter()
+        .rect_filled(rect, Rounding::same(rect.height() / 2.0), bg);
     let r = rect.height() / 2.0 - 2.0;
     let x = egui::lerp((rect.left() + r + 2.0)..=(rect.right() - r - 2.0), t);
-    ui.painter().circle_filled(egui::pos2(x, rect.center().y), r, p.knob);
+    ui.painter()
+        .circle_filled(egui::pos2(x, rect.center().y), r, p.knob);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
     resp.clicked()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn row(
     ui: &mut egui::Ui,
     p: &Pal,
@@ -816,90 +1009,119 @@ fn row(
     title: &str,
     sub: &str,
     on: bool,
-    h: f32,
     key: &str,
 ) -> bool {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, h), Sense::hover());
+    // 4 px top, 40 px text block, 12 px bottom: the row padding from the CSS.
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 56.0), Sense::hover());
+    let cy = rect.top() + 24.0;
     let painter = ui.painter().clone();
-    let tile = Rect::from_center_size(egui::pos2(rect.left() + 17.0, rect.center().y), Vec2::splat(34.0));
-    let (bg, fg) = match icon {
-        Icon::Mic => (p.peach, p.accent),
-        Icon::Speaker => (p.peri, p.peri_fg),
-        Icon::Shield => (p.surface, p.muted),
-    };
-    painter.rect_filled(tile, Rounding::same(10.0), bg);
-    draw_icon(&painter, tile.center(), icon, fg);
+    let tile = Rect::from_center_size(
+        egui::pos2(rect.left() + 17.0, cy),
+        Vec2::splat(34.0),
+    );
+    match icon {
+        Icon::Mic => {
+            painter.rect_filled(tile, Rounding::same(10.0), p.peach);
+            draw_icon(&painter, tile.center(), icon, p.accent);
+        }
+        Icon::Speaker => {
+            painter.rect_filled(tile, Rounding::same(10.0), p.peri);
+            draw_icon(&painter, tile.center(), icon, p.peri_fg);
+        }
+        // The shield sits on the bare canvas, no tile behind it.
+        Icon::Shield => draw_icon(&painter, tile.center(), icon, p.muted),
+    }
     painter.text(
-        egui::pos2(rect.left() + 46.0, rect.center().y - 8.0),
+        egui::pos2(rect.left() + 46.0, cy - 9.5),
         Align2::LEFT_CENTER,
         title,
-        FontId::proportional(14.0),
+        sb(14.0),
         p.ink,
     );
     painter.text(
-        egui::pos2(rect.left() + 46.0, rect.center().y + 9.0),
+        egui::pos2(rect.left() + 46.0, cy + 9.5),
         Align2::LEFT_CENTER,
         sub,
-        FontId::proportional(12.5),
+        f(12.5),
         p.muted,
     );
-    let tr = Rect::from_center_size(
-        egui::pos2(rect.right() - 20.0, rect.center().y),
+    let toggle = Rect::from_center_size(
+        egui::pos2(rect.right() - 20.0, cy),
         Vec2::new(40.0, 22.0),
     );
-    toggle_at(ui, p, tr, on, ui.id().with(("toggle", key)))
+    toggle_at(ui, p, toggle, on, ui.id().with(("toggle", key)))
 }
 
 fn plain_row(ui: &mut egui::Ui, p: &Pal, title: &str, sub: &str, on: bool, key: &str) -> bool {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 48.0), Sense::hover());
+    // 4 px top, 40 px text block, 16 px bottom.
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 60.0), Sense::hover());
+    let cy = rect.top() + 24.0;
     let painter = ui.painter().clone();
     painter.text(
-        egui::pos2(rect.left(), rect.center().y - 9.0),
+        egui::pos2(rect.left(), cy - 9.5),
         Align2::LEFT_CENTER,
         title,
-        FontId::proportional(14.0),
+        sb(14.0),
         p.ink,
     );
     painter.text(
-        egui::pos2(rect.left(), rect.center().y + 9.0),
+        egui::pos2(rect.left(), cy + 9.5),
         Align2::LEFT_CENTER,
         sub,
-        FontId::proportional(12.5),
+        f(12.5),
         p.muted,
     );
-    let tr = Rect::from_center_size(
-        egui::pos2(rect.right() - 20.0, rect.center().y),
+    let toggle = Rect::from_center_size(
+        egui::pos2(rect.right() - 20.0, cy),
         Vec2::new(40.0, 22.0),
     );
-    toggle_at(ui, p, tr, on, ui.id().with(("toggle", key)))
+    toggle_at(ui, p, toggle, on, ui.id().with(("toggle", key)))
 }
 
-fn segmented(ui: &mut egui::Ui, p: &Pal, key: &str, labels: &[&str], sel: usize) -> Option<usize> {
+fn segmented(
+    ui: &mut egui::Ui,
+    p: &Pal,
+    key: &str,
+    labels: &[&str],
+    sel: usize,
+    four: bool,
+) -> Option<usize> {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 34.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 40.0), Sense::hover());
     let painter = ui.painter().clone();
-    painter.rect_filled(rect, Rounding::same(10.0), p.track);
+    painter.rect_filled(rect, Rounding::same(9.0), p.track);
     let n = labels.len();
-    let seg = (w - 6.0) / n as f32;
+    let seg = (w - 6.0 - 2.0 * (n as f32 - 1.0)) / n as f32;
     let mut picked = None;
     for i in 0..n {
         let r = Rect::from_min_size(
-            egui::pos2(rect.left() + 3.0 + i as f32 * seg, rect.top() + 3.0),
-            Vec2::new(seg, 28.0),
+            egui::pos2(rect.left() + 3.0 + i as f32 * (seg + 2.0), rect.top() + 3.0),
+            Vec2::new(seg, 34.0),
         );
         let resp = ui.interact(r, ui.id().with((key, i)), Sense::click());
-        if i == sel {
-            painter.rect_filled(r, Rounding::same(8.0), p.white);
-            painter.rect_stroke(r, Rounding::same(8.0), Stroke::new(1.0_f32, p.border));
+        let active = i == sel;
+        if active {
+            painter.rect_filled(r, Rounding::same(7.0), p.white);
+            painter.rect_stroke(r, Rounding::same(7.0), Stroke::new(1.0_f32, p.border));
         }
         painter.text(
             r.center(),
             Align2::CENTER_CENTER,
             labels[i],
-            FontId::proportional(13.0),
-            if i == sel { p.ink } else { p.muted },
+            if active {
+                sb(if four { 12.5 } else { 13.5 })
+            } else {
+                f(if four { 12.5 } else { 13.5 })
+            },
+            if active {
+                p.accent
+            } else if resp.hovered() {
+                p.ink
+            } else {
+                p.muted
+            },
         );
         if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -909,25 +1131,6 @@ fn segmented(ui: &mut egui::Ui, p: &Pal, key: &str, labels: &[&str], sel: usize)
         }
     }
     picked
-}
-
-fn button(ui: &mut egui::Ui, p: &Pal, label: &str, wide: bool) -> bool {
-    let w = if wide { ui.available_width() } else { 74.0 };
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 34.0), Sense::click());
-    let painter = ui.painter();
-    painter.rect_filled(rect, Rounding::same(8.0), p.white);
-    painter.rect_stroke(rect, Rounding::same(8.0), Stroke::new(1.0_f32, p.border_strong));
-    painter.text(
-        rect.center(),
-        Align2::CENTER_CENTER,
-        label,
-        FontId::proportional(13.0),
-        p.ink,
-    );
-    if resp.hovered() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-    }
-    resp.clicked()
 }
 
 /// A dropdown that keeps the popover's look: one bordered row, a list under it.
@@ -943,17 +1146,18 @@ fn select(
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 44.0), Sense::click());
     let painter = ui.painter().clone();
     painter.rect_filled(rect, Rounding::same(10.0), p.white);
-    painter.rect_stroke(rect, Rounding::same(10.0), Stroke::new(1.0_f32, p.border_strong));
+    painter.rect_stroke(rect.shrink(0.5), Rounding::same(10.0), Stroke::new(1.0_f32, p.border));
     painter.text(
         egui::pos2(rect.left() + 14.0, rect.center().y),
         Align2::LEFT_CENTER,
         &items[current],
-        FontId::proportional(13.5),
+        f(13.5),
         p.ink,
     );
-    let chev = egui::pos2(rect.right() - 16.0, rect.center().y);
-    painter.line_segment([egui::pos2(chev.x - 4.0, chev.y - 2.0), chev], Stroke::new(1.5_f32, p.muted));
-    painter.line_segment([chev, egui::pos2(chev.x + 4.0, chev.y - 2.0)], Stroke::new(1.5_f32, p.muted));
+    let chev = egui::pos2(rect.right() - 13.0 - 7.5, rect.center().y);
+    let stroke = Stroke::new(1.7_f32, p.muted);
+    painter.line_segment([egui::pos2(chev.x - 4.0, chev.y - 2.0), egui::pos2(chev.x, chev.y + 2.0)], stroke);
+    painter.line_segment([egui::pos2(chev.x, chev.y + 2.0), egui::pos2(chev.x + 4.0, chev.y - 2.0)], stroke);
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
@@ -980,11 +1184,9 @@ fn select(
                     ui.set_width(rect.width() - 12.0);
                     for (i, name) in items.iter().enumerate() {
                         let color = if i == current { p.accent } else { p.ink };
-                        let b = egui::Button::new(
-                            egui::RichText::new(name).size(13.0).color(color),
-                        )
-                        .fill(Color32::TRANSPARENT)
-                        .min_size(Vec2::new(ui.available_width(), 30.0));
+                        let b = egui::Button::new(egui::RichText::new(name).size(13.0).color(color))
+                            .fill(Color32::TRANSPARENT)
+                            .min_size(Vec2::new(ui.available_width(), 30.0));
                         if ui.add(b).clicked() {
                             picked = Some(i);
                         }
@@ -1010,26 +1212,35 @@ fn select(
 
 fn meter_card(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 62.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(w, 83.0), Sense::hover());
     let painter = ui.painter().clone();
     painter.rect_filled(rect, Rounding::same(12.0), p.surface);
 
-    let mic = egui::pos2(rect.left() + 20.0, rect.center().y);
-    draw_icon(&painter, mic, Icon::Mic, p.muted);
+    let top = Rect::from_min_size(
+        egui::pos2(rect.left() + 14.0, rect.top() + 12.0),
+        Vec2::new(w - 28.0, 36.0),
+    );
 
-    let btn = Rect::from_center_size(
-        egui::pos2(rect.right() - 49.0, rect.center().y),
-        Vec2::new(74.0, 30.0),
+    let label = t(st.lang_id, if st.listening { "test_stop" } else { "test_start" });
+    let text = painter.layout_no_wrap(label.to_owned(), sb(13.5), if st.listening { p.accent } else { p.ink });
+    let btn = Rect::from_min_size(
+        egui::pos2(top.right() - text.size().x - 28.0, top.top()),
+        Vec2::new(text.size().x + 28.0, 36.0),
     );
     let resp = ui.interact(btn, ui.id().with("test"), Sense::click());
-    painter.rect_filled(btn, Rounding::same(8.0), p.white);
-    painter.rect_stroke(btn, Rounding::same(8.0), Stroke::new(1.0_f32, p.border_strong));
-    painter.text(
-        btn.center(),
-        Align2::CENTER_CENTER,
-        t(st.lang_id, if st.listening { "test_stop" } else { "test_start" }),
-        FontId::proportional(13.0),
-        p.ink,
+    painter.rect_filled(btn, Rounding::same(9.0), p.white);
+    painter.rect_stroke(
+        btn,
+        Rounding::same(9.0),
+        Stroke::new(1.0_f32, if st.listening { p.accent_soft } else { p.border }),
+    );
+    painter.galley(
+        egui::pos2(
+            btn.center().x - text.size().x / 2.0,
+            btn.center().y - text.size().y / 2.0,
+        ),
+        text,
+        if st.listening { p.accent } else { p.ink },
     );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -1038,24 +1249,44 @@ fn meter_card(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>)
         out.push(Action::TestToggle);
     }
 
+    draw_icon(
+        &painter,
+        egui::pos2(top.left() + 8.0, top.center().y),
+        Icon::Mic,
+        p.muted,
+    );
+
     const BARS: usize = 12;
-    let left = mic.x + 16.0;
-    let right = btn.left() - 14.0;
-    let gap = 3.0;
+    let left = top.left() + 27.0;
+    let right = btn.left() - 10.0;
+    let gap = 2.0;
     let bw = ((right - left) - gap * (BARS as f32 - 1.0)) / BARS as f32;
     let db = 20.0 * (st.level.max(1e-8)).log10();
-    let lit = (((db + 60.0) / 60.0) * BARS as f32).round().clamp(0.0, BARS as f32) as usize;
+    let lit = (((db + 60.0) / 60.0) * BARS as f32)
+        .round()
+        .clamp(0.0, BARS as f32) as usize;
     for i in 0..BARS {
         let x = left + i as f32 * (bw + gap);
-        let r = Rect::from_center_size(
-            egui::pos2(x + bw / 2.0, rect.center().y),
-            Vec2::new(bw, 22.0),
-        );
-        let on = i < lit;
         painter.rect_filled(
-            r,
+            Rect::from_center_size(
+                egui::pos2(x + bw / 2.0, top.center().y),
+                Vec2::new(bw, 10.0),
+            ),
             Rounding::same(2.0),
-            if on { p.accent } else { p.meter_off },
+            if i < lit { p.accent } else { p.meter_off },
         );
     }
+
+    let note = format!(
+        "{} {}",
+        t(st.lang_id, "test_note"),
+        t(st.lang_id, if st.listening { "test_live" } else { "test_idle" })
+    );
+    painter.text(
+        egui::pos2(rect.left() + 14.0, rect.top() + 12.0 + 36.0 + 9.0),
+        Align2::LEFT_TOP,
+        note,
+        f(12.0),
+        p.muted,
+    );
 }

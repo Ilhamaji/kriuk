@@ -246,11 +246,11 @@ function ready() {
 /* the five presses in the story: [time, element getter] */
 function clicks() {
   return [
-    [2.5, () => ui.micTest],
-    [5.5, () => ui.echoToggle],
-    [6.9, () => ui.eq.querySelector('button[data-value="jelas"]')],
-    [9.55, () => ui.tabSettings],
-    [10.05, () => ui.autostart],
+    [3.4, () => ui.micTest],
+    [6.1, () => ui.echoToggle],
+    [7.4, () => ui.eq.querySelector('button[data-value="jelas"]')],
+    [9.45, () => ui.tabSettings],
+    [10.5, () => ui.autostart],
   ];
 }
 
@@ -271,13 +271,13 @@ function setTime(t) {
   const dark = t >= 8.6;
   ui.root.setAttribute('data-theme', dark ? 'dark' : 'light');
   stage.classList.toggle('is-dark', dark);
-  if (t >= 9.55 && !ui.langId.classList.contains('is-active')) ui.langId.click();
-  else if (t < 9.55 && ui.langId.classList.contains('is-active')) ui.langId.click();
-  const onSettings = t >= 9.55;
+  if (t >= 9.45 && !ui.langId.classList.contains('is-active')) ui.langId.click();
+  else if (t < 9.45 && ui.langId.classList.contains('is-active')) ui.langId.click();
+  const onSettings = t >= 9.45;
   const onSettingsTab = ui.tabSettings.classList.contains('is-active');
   if (onSettings !== onSettingsTab) (onSettings ? ui.tabSettings : ui.tabAudio).click();
   /* the tray settings land as the caption names them */
-  const autoOn = t >= 10.05;
+  const autoOn = t >= 10.5;
   ui.autostart.classList.toggle('is-on', autoOn);
   ui.autostart.setAttribute('aria-checked', String(autoOn));
 
@@ -292,8 +292,9 @@ function setTime(t) {
      zoom about the hero centre plus a compensating pan keeps the target centred. */
   const HERO_H = 1342;
   const FOCUS = [
-    { t0: 2.65, t1: 5.35, s: 1.12, p: 0.72 }, // meter card
-    { t0: 5.75, t1: 8.3, s: 1.1, p: 0.55 },   // echo row + equalizer
+    { t0: 2.6, t1: 5.5, s: 1.12, p: 0.72 },  // meter card
+    { t0: 5.5, t1: 8.35, s: 1.1, p: 0.55 },  // echo row + equalizer
+    { t0: 9.0, t1: 11.4, s: 1.07, p: 0.5 },  // tray settings
   ];
   let zoom = 1;
   let pan = 0;
@@ -313,7 +314,7 @@ function setTime(t) {
     ' scale(' + (pulse * (1 - 0.08 * outro) * zoom).toFixed(4) + ')';
 
   /* BEAT 2 — the chain is running */
-  const testing = t >= 2.5 && t < 11.5;
+  const testing = t >= 3.4 && t < 11.5;
   const id = ui.langId.classList.contains('is-active');
   ui.micTest.classList.toggle('is-live', testing);
   ui.micTest.textContent = testing ? (id ? 'Hentikan' : 'Stop') : (id ? 'Mulai' : 'Start');
@@ -330,23 +331,23 @@ function setTime(t) {
   ui.meterBars.forEach((b, i) => b.classList.toggle('on', i < lit));
 
   /* banner check draws once the chain is live */
-  const draw = easeInOut(seg(t, 2.6, 3.0));
+  const draw = easeInOut(seg(t, 3.5, 3.95));
   ui.check.style.strokeDasharray = '24';
   ui.check.style.strokeDashoffset = String(24 * (1 - draw));
 
   /* noisy waveform settles into a clean line */
-  const settle = easeInOut(seg(t, 2.6, 3.6));
+  const settle = easeInOut(seg(t, 3.5, 4.5));
   noisy.setAttribute('d', wavePath(1.7 * (1 - settle), t * 1.2));
   clean.setAttribute('d', calmPath(t * 0.9));
   clean.style.opacity = String(settle);
 
   /* BEAT 3 — echo cancellation and equalizer */
-  const echoOn = t >= 5.5;
+  const echoOn = t >= 6.1;
   ui.echoToggle.classList.toggle('is-on', echoOn);
   ui.echoToggle.setAttribute('aria-checked', echoOn ? 'true' : 'false');
   ui.echoSub.textContent = echoOn ? (id ? 'Gema speaker dihapus' : 'Speaker echo removed') : (id ? 'Mati' : 'Off');
 
-  const eqTo = t >= 6.9;
+  const eqTo = t >= 7.4;
   const kids = Array.from(ui.eq.children).filter((n) => n.tagName === 'BUTTON');
   kids.forEach((b, i) => b.classList.toggle('is-active', i === (eqTo ? 1 : 0)));
   ui.eqLabel.textContent = id
@@ -356,21 +357,21 @@ function setTime(t) {
   /* ghost pill slides from Neutral to Clear */
   const rects = eqRects();
   if (rects.length >= 2) {
-    const k = easeInOut(seg(t, 6.6, 6.95));
+    const k = easeInOut(seg(t, 7.05, 7.4));
     const a = rects[0];
     const b = rects[1];
     ghost.style.top = a.top + 'px';
     ghost.style.height = a.height + 'px';
     ghost.style.left = (a.left + (b.left - a.left) * k) + 'px';
     ghost.style.width = (a.width + (b.width - a.width) * k) + 'px';
-    ghost.style.opacity = String(t > 6.5 && t < 7.1 ? 0.9 * (1 - Math.abs(k - 0.5) * 1.2) : 0);
+    ghost.style.opacity = String(t > 6.95 && t < 7.55 ? 0.9 * (1 - Math.abs(k - 0.5) * 1.2) : 0);
   }
 
   /* frequency curve lifts once Clear is picked */
-  const lift = easeOut(seg(t, 6.9, 7.6));
+  const lift = easeOut(seg(t, 7.4, 8.1));
 
   /* cursor: glide to the next target, arrive on the beat, ripple on the press */
-  const LEAD = 0.65;
+  const LEAD = 0.55;
   const beats = clicks();
   let pos = null;
   let pressed = null;
@@ -389,7 +390,7 @@ function setTime(t) {
   }
   if (pos) {
     ui.cursor.style.transform = `translate(${pos.x.toFixed(1)}px, ${pos.y.toFixed(1)}px)`;
-    ui.cursor.style.opacity = String(easeInOut(seg(t, 1.9, 2.15)));
+    ui.cursor.style.opacity = String(easeInOut(seg(t, 2.75, 3.05)));
   }
   const ink = ui.cursor.querySelector('path').style;
   ink.fill = dark ? '#F3F0EA' : '#1C1B1A';

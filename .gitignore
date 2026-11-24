@@ -10,6 +10,8 @@
 node_modules/
 *.log
 
-# Promo video: only the rendered mp4 is tracked, frames are regenerated
-/docs/promo/frames/
-/docs/promo/audio/
+# Local-only: the promo video, the HTML mock-up it is rendered from, and the dev
+# scripts that build it. None of it ships in the app, so it stays off the remote.
+/docs/
+/src/
+/tools/

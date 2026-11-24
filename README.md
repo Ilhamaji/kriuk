@@ -14,10 +14,6 @@ background service, no account. The panel is drawn with `egui` in the same
 process that runs the DSP. The chain keeps running in the tray, so it is still
 cleaning your voice after the panel is hidden or closed.
 
-<img src="docs/screenshot.png" width="320" alt="Kriuk popover, Audio tab, light theme">
-
-▶ [30-second demo](docs/promo.mp4) — vertical 9:16, captions tell the story, so it works muted.
-
 ## Why
 
 Most noise-suppression tools are subscriptions that push your voice through
@@ -140,9 +136,7 @@ microphone ────────┘                                          
 | `src-tauri/src/settings.rs` | the remembered chain, devices, language and theme in `%APPDATA%\Kriuk\settings.json` |
 | `src-tauri/src/aec.rs` | PBFDAF echo canceller and its unit tests |
 | `src-tauri/src/eq.rs` | biquad equalizer, presets, auto curve |
-| `src/` | the HTML mock-up the demo video is rendered from; not part of the binary |
-| `tools/make-icon.js` | generates the icon set without dependencies |
-| `tools/serve.mjs`, `tools/render-promo.mjs`, `tools/build-video.mjs` | preview server and frame renderer for the demo video |
+| `assets/` | tray and app icons embedded in the binary |
 | `DESIGN.md` | visual specification |
 | `REMAKE-RUST.md`, `REPORT.md` | reverse-engineering notes that led to this build |
 

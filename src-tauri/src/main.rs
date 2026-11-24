@@ -82,10 +82,13 @@ pub struct State {
     pub listening: bool,
     pub level: f32,
     pub peak: f32,
+    /// Session-only: the focus mode is simulated, like it was in the webview.
+    pub focus: bool,
     pub notice: Option<&'static str>,
     pub err: Option<String>,
     pub tab: u8,
-    pub tests: Vec<f32>,
+    /// Peak dB and the clock time of each mic test, newest last.
+    pub tests: Vec<(f32, String)>,
     /// Which dropdown is open; a native panel has to track it itself.
     pub open: Option<u8>,
 }
@@ -110,6 +113,7 @@ impl State {
             listening: false,
             level: 0.0,
             peak: 0.0,
+            focus: true,
             notice: None,
             err: None,
             tab: 0,
@@ -123,7 +127,6 @@ impl State {
             chain: self.listening,
             mic: self.mic.clone(),
             spk: self.spk.clone(),
-            spk_on: self.spk_on,
             aec_on: self.aec_on,
             denoise: self.denoise,
             reduction: self.reduction,
@@ -150,6 +153,26 @@ fn wet_mix(level: u8) -> f32 {
         0 => 0.25,
         2 => 1.0,
         _ => 0.6,
+    }
+}
+
+/// Wall clock for the activity list, the way the webview printed it.
+fn clock() -> String {
+    use windows_sys::Win32::Foundation::SYSTEMTIME;
+    use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+    let mut t: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut t) };
+    format!("{:02}:{:02}", t.wHour, t.wMinute)
+}
+
+/// One row per finished mic test, newest last. It is a session log, so it is
+/// capped instead of growing for as long as the app runs.
+fn log_test(st: &mut State) {
+    if st.listening && st.peak > 0.0 {
+        st.tests.push((20.0 * st.peak.log10(), clock()));
+        if st.tests.len() > 20 {
+            st.tests.remove(0);
+        }
     }
 }
 
@@ -258,10 +281,13 @@ fn set_autostart(on: bool) -> Result<(), String> {
 
 /// A Run entry holds an absolute path, so moving the exe leaves it dead. Rewrite
 /// it with the current path on every launch: one manual start repairs autostart.
-fn refresh_autostart() {
-    if get_autostart() {
+/// Returns the state after the repair, so startup only asks the registry once.
+fn refresh_autostart() -> bool {
+    let on = get_autostart();
+    if on {
         let _ = set_autostart(true);
     }
+    on
 }
 
 fn pick_device(host: &cpal::Host, wanted: Option<&str>) -> Result<cpal::Device, String> {
@@ -350,6 +376,8 @@ fn run_meter(
             level.clone(),
             queue.clone(),
             reference.clone(),
+            shared.clone(),
+            proxy.clone(),
         ),
         SampleFormat::I16 => capture::<i16>(
             &device,
@@ -358,6 +386,8 @@ fn run_meter(
             level.clone(),
             queue.clone(),
             reference.clone(),
+            shared.clone(),
+            proxy.clone(),
         ),
         SampleFormat::U16 => capture::<u16>(
             &device,
@@ -366,6 +396,8 @@ fn run_meter(
             level.clone(),
             queue.clone(),
             reference.clone(),
+            shared.clone(),
+            proxy.clone(),
         ),
         other => return Err(format!("unsupported sample format: {other:?}")),
     }
@@ -395,7 +427,10 @@ fn run_meter(
         if want && (monitor.is_none() || target != monitor_target) {
             monitor = build_monitor(&host, queue.clone(), target.as_deref());
             monitor_target = target;
-            if monitor.is_none() {
+            if monitor.is_some() {
+                // Anything left from the previous output would play late.
+                queue.lock().unwrap().clear();
+            } else {
                 MONITOR_ON.store(false, Ordering::Relaxed);
             }
         } else if !want && monitor.is_some() {
@@ -466,6 +501,7 @@ fn run_meter(
 
 /// Capture → downmix → denoise → wet mix → level + monitor queue.
 /// Everything is allocated up front; the audio callback only writes into it.
+#[allow(clippy::too_many_arguments)]
 fn capture<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -473,6 +509,8 @@ fn capture<T>(
     level: Arc<Mutex<f32>>,
     queue: Arc<Mutex<VecDeque<f32>>>,
     reference: Arc<Mutex<VecDeque<f32>>>,
+    shared: Shared,
+    proxy: EventLoopProxy<UserEvent>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError>
 where
     T: SizedSample + Sample,
@@ -567,7 +605,15 @@ where
                 }
             }
         },
-        |e| eprintln!("kriuk capture: {e}"),
+        // A yanked USB mic stops the stream silently otherwise: the meter would
+        // keep saying "live" with a dead device behind it.
+        move |e| {
+            if let Ok(mut st) = shared.lock() {
+                st.err = Some(format!("mic stopped: {e}"));
+            }
+            METER_RUNNING.store(false, Ordering::SeqCst);
+            wake(&proxy);
+        },
         None,
     )
 }
@@ -634,7 +680,6 @@ fn spawn_loopback(
         if let Err(err) = run_loopback(&queue) {
             AEC_ON.store(false, Ordering::Relaxed);
             let mut st = shared.lock().unwrap();
-            st.notice = Some("aec_same");
             st.aec_on = false;
             st.err = Some(err);
             drop(st);
@@ -909,6 +954,11 @@ impl App {
         // Windows only reports new devices on request, so refresh on every open.
         // Enumeration takes seconds on some machines, so it never runs on the UI
         // thread; the list from the previous pass is already on screen.
+        {
+            // A dropdown left open when the panel hid would reopen by itself.
+            let mut st = self.shared.lock().unwrap();
+            st.open = None;
+        }
         refresh_devices(self.shared.clone(), self.proxy.clone());
         self.shown_at = Instant::now();
         match Panel::open(el) {
@@ -981,6 +1031,8 @@ impl App {
     fn apply(&mut self, action: ui::Action, _el: &ActiveEventLoop) {
         let mut hide = false;
         let mut relabel = false;
+        let mut write = true;
+        let mut saved = None;
         let mut start: Option<Option<String>> = None;
         {
             let mut st = self.shared.lock().unwrap();
@@ -988,12 +1040,19 @@ impl App {
                 ui::Action::Tab(i) => {
                     st.tab = i;
                     st.open = None;
+                    write = false;
                 }
-                ui::Action::Hide => hide = true,
+                ui::Action::Hide => {
+                    hide = true;
+                    write = false;
+                }
                 ui::Action::Denoise(on) => {
                     st.denoise = on;
                     DENOISE.store(on, Ordering::Relaxed);
                     if !on {
+                        // Stopping the chain ends the current test, so its peak
+                        // still lands in the activity list.
+                        log_test(&mut st);
                         METER_RUNNING.store(false, Ordering::SeqCst);
                     }
                 }
@@ -1014,6 +1073,11 @@ impl App {
                     st.spk_on = on;
                     st.notice = None;
                     MONITOR_ON.store(on, Ordering::Relaxed);
+                    // Routing only exists while the mic chain runs, so turning it
+                    // on starts the chain, the way the webview did.
+                    if on && !st.listening {
+                        start = Some(st.mic.clone());
+                    }
                 }
                 ui::Action::Mic(device) => {
                     st.mic = device;
@@ -1024,10 +1088,7 @@ impl App {
                 }
                 ui::Action::TestToggle => {
                     if st.listening {
-                        let peak = st.peak;
-                        if peak > 0.0 {
-                            st.tests.push(20.0 * peak.log10());
-                        }
+                        log_test(&mut st);
                         METER_RUNNING.store(false, Ordering::SeqCst);
                     } else {
                         start = Some(st.mic.clone());
@@ -1043,6 +1104,7 @@ impl App {
                     st.dark_set = true;
                     self.follow_system_theme = false;
                 }
+                ui::Action::Focus(on) => st.focus = on,
                 ui::Action::CloseToTray(on) => {
                     st.close_to_tray = on;
                     CLOSE_TO_TRAY.store(on, Ordering::Relaxed);
@@ -1052,8 +1114,13 @@ impl App {
                     Err(err) => st.err = Some(err),
                 },
             }
-            let saved = st.saved();
-            drop(st);
+            // Tab and Hide change nothing that is stored, so they skip the write.
+            if write {
+                saved = Some(st.saved());
+            }
+        }
+
+        if let Some(saved) = saved {
             settings::save(&saved);
         }
 
@@ -1110,8 +1177,7 @@ impl ApplicationHandler<UserEvent> for App {
             self.shared.lock().unwrap().dark = dark;
         }
         self.build_tray();
-        refresh_autostart();
-        self.shared.lock().unwrap().autostart = get_autostart();
+        self.shared.lock().unwrap().autostart = refresh_autostart();
 
         let hidden = std::env::args().any(|a| a == "--hidden");
         if !hidden {
@@ -1347,6 +1413,19 @@ mod tests {
             gap_db > 5.0,
             "light keeps only {gap_db:.1} dB more noise than maximum; the presets are too close"
         );
+    }
+
+    /// The activity tab is a session log, so it must not grow without bound.
+    #[test]
+    fn the_activity_list_is_capped() {
+        let mut st = crate::State::from_saved(crate::settings::Saved::default(), false);
+        st.listening = true;
+        st.peak = 0.5;
+        for _ in 0..40 {
+            crate::log_test(&mut st);
+        }
+        assert_eq!(st.tests.len(), 20);
+        assert!(st.tests[0].1.contains(':'));
     }
 
     #[test]

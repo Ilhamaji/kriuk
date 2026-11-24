@@ -20,6 +20,7 @@ pub enum Action {
     TestToggle,
     Lang(bool),
     Dark(bool),
+    Focus(bool),
     CloseToTray(bool),
     Autostart(bool),
 }
@@ -141,6 +142,8 @@ fn t(id: bool, key: &str) -> &'static str {
             "activity_empty" => "Belum ada tes mikrofon.",
             "activity_goto" => "Buka kontrol audio",
             "settings_title" => "Preferensi Kriuk",
+            "focus" => "Mode fokus otomatis",
+            "focus_sub" => "Simulasi untuk sesi ini.",
             "start_windows" => "Mulai dengan Windows",
             "start_windows_sub" => "Buka Kriuk di tray saat kamu masuk.",
             "close_tray" => "Tutup ke tray",
@@ -196,6 +199,8 @@ fn t(id: bool, key: &str) -> &'static str {
             "activity_empty" => "No mic tests yet.",
             "activity_goto" => "Open audio controls",
             "settings_title" => "Kriuk preferences",
+            "focus" => "Automatic focus mode",
+            "focus_sub" => "Simulated for this session.",
             "start_windows" => "Start with Windows",
             "start_windows_sub" => "Open Kriuk in the tray when you sign in.",
             "close_tray" => "Close to tray",
@@ -221,10 +226,12 @@ fn tr(id: bool, key: &str) -> String {
 }
 
 /// Segoe UI, like the webview used: the default egui font is noticeably wider.
+/// The bytes are read once and handed to every panel, because closing and
+/// reopening the popover builds a brand new context each time.
 pub fn install_fonts(ctx: &egui::Context) {
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
+    use std::sync::OnceLock;
+    static FONTS: OnceLock<FontDefinitions> = OnceLock::new();
+    let fonts = FONTS.get_or_init(|| {
         let mut fonts = FontDefinitions::default();
         if let Ok(bytes) = std::fs::read("C:\\Windows\\Fonts\\segoeui.ttf") {
             fonts
@@ -249,8 +256,9 @@ pub fn install_fonts(ctx: &egui::Context) {
                 }
             }
         }
-        ctx.set_fonts(fonts);
+        fonts
     });
+    ctx.set_fonts(fonts.clone());
 }
 
 fn f(size: f32) -> FontId {
@@ -663,16 +671,16 @@ fn activity(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
         }
     } else {
         ui.add_space(10.0);
-        for peak in st.tests.iter().rev() {
+        for (peak, when) in st.tests.iter().rev() {
             let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 38.0), Sense::hover());
             let painter = ui.painter().clone();
             painter.rect_filled(rect, Rounding::same(10.0), p.surface);
             painter.text(
                 egui::pos2(rect.left() + 12.0, rect.center().y),
                 Align2::LEFT_CENTER,
-                "Mic test",
-                f(13.0),
-                p.ink,
+                when,
+                f(12.5),
+                p.muted,
             );
             painter.text(
                 egui::pos2(rect.right() - 12.0, rect.center().y),
@@ -692,6 +700,9 @@ fn settings(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     view_title(ui, p, t(id, "settings_title"));
     ui.add_space(10.0);
 
+    if plain_row(ui, p, &tr(id, "focus"), &tr(id, "focus_sub"), st.focus, "focus") {
+        out.push(Action::Focus(!st.focus));
+    }
     if plain_row(ui, p, &tr(id, "start_windows"), &tr(id, "start_windows_sub"), st.autostart, "auto") {
         out.push(Action::Autostart(!st.autostart));
     }
@@ -1289,4 +1300,26 @@ fn meter_card(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>)
         f(12.0),
         p.muted,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every panel builds a new egui context, so the fonts have to be installed
+    /// for each one; a one-shot install left the second context without the
+    /// semibold and bold families and panicked on the first frame.
+    #[test]
+    fn fonts_are_installed_for_every_context() {
+        for _ in 0..2 {
+            let ctx = egui::Context::default();
+            install_fonts(&ctx);
+            let out = ctx.run(egui::RawInput::default(), |ctx| {
+                let p = ctx.layer_painter(egui::LayerId::background());
+                p.text(egui::pos2(8.0, 8.0), Align2::LEFT_TOP, "kriuk", b(22.0), Color32::WHITE);
+                p.text(egui::pos2(8.0, 40.0), Align2::LEFT_TOP, "kriuk", sb(12.0), Color32::WHITE);
+            });
+            assert!(!out.shapes.is_empty());
+        }
+    }
 }

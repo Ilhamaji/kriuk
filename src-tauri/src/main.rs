@@ -56,9 +56,9 @@ type ShownAt = Arc<Mutex<Instant>>;
 
 fn wet_mix(level: u8) -> f32 {
     match level {
-        0 => 0.4,
+        0 => 0.25,
         2 => 1.0,
-        _ => 0.75,
+        _ => 0.6,
     }
 }
 
@@ -726,7 +726,56 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::same_device;
+    use super::{same_device, wet_mix, DenoiseState, FRAME};
+
+    fn noise(i: usize) -> f32 {
+        let mut x = (i as u32).wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
+        x = (x ^ (x >> 16)).wrapping_mul(2_246_822_519);
+        x ^= x >> 13;
+        x as f32 / u32::MAX as f32 * 2.0 - 1.0
+    }
+
+    /// The three reduction levels must actually differ, not just relabel a constant.
+    #[test]
+    fn reduction_levels_change_how_much_noise_survives() {
+        let mut denoiser = DenoiseState::new();
+        let mut input = vec![0f32; FRAME];
+        let mut clean = vec![0f32; FRAME];
+        let light_wet = wet_mix(0);
+        let maximum_wet = wet_mix(2);
+        let mut energy = [0f64; 2];
+        let mut blocks = 0usize;
+
+        for block in 0..400 {
+            for (i, s) in input.iter_mut().enumerate() {
+                *s = 0.06 * noise(block * FRAME + i);
+            }
+            let scaled: Vec<f32> = input.iter().map(|s| s * 32_768.0).collect();
+            denoiser.process_frame(&mut clean, &scaled);
+            if block < 40 {
+                continue; // let the model settle before measuring
+            }
+            for i in 0..FRAME {
+                let wet = clean[i] / 32_768.0;
+                let light = input[i] * (1.0 - light_wet) + wet * light_wet;
+                let maximum = input[i] * (1.0 - maximum_wet) + wet * maximum_wet;
+                energy[0] += (light * light) as f64;
+                energy[1] += (maximum * maximum) as f64;
+            }
+            blocks += 1;
+        }
+
+        let samples = (blocks * FRAME) as f64;
+        let light = (energy[0] / samples).sqrt();
+        let maximum = (energy[1] / samples).sqrt();
+        let gap_db = 20.0 * (light / maximum).log10();
+        // RNNoise itself only pulls white noise down by ~9 dB, so that is the ceiling
+        // for any wet-mix preset; real hiss and fans give it more to work with.
+        assert!(
+            gap_db > 5.0,
+            "light keeps only {gap_db:.1} dB more noise than maximum; the presets are too close"
+        );
+    }
 
     #[test]
     fn monitor_on_the_default_device_is_the_echo_reference() {

@@ -29,7 +29,7 @@ that ships inside the binary, and nothing leaves the device.
 | Feature | How it works |
 |---|---|
 | Mic noise cancellation | RNNoise (`nnnoiseless`) at 48 kHz, 10 ms frames, on the WASAPI audio thread |
-| Reduction level | Light / Balanced / Maximum = 40 / 75 / 100 % wet mix |
+| Reduction level | Light / Balanced / Maximum = 25 / 60 / 100 % wet mix |
 | Echo cancellation | Partitioned block frequency-domain adaptive filter (`rustfft`), 4 partitions × 480 samples ≈ 40 ms, reference from a WASAPI loopback of the default output device, Geigel double-talk guard |
 | Equalizer | RBJ biquads: Neutral (true bypass), Clear, Warm, and Auto, which measures the 300 Hz / 3 kHz band balance twice a second and tilts the curve, clamped to ±4–5 dB |
 | Level meter | Peak level of the processed signal, 12 bars |

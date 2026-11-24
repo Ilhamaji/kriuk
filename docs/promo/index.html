@@ -225,7 +225,38 @@ function ready() {
   ghost = doc.createElement('span');
   ghost.style.cssText = 'position:absolute;pointer-events:none;opacity:0;border-radius:9px;background:var(--elevated,#fff);box-shadow:0 1px 2px rgba(28,27,26,.06);transition:none;';
   ui.eq.appendChild(ghost);
+
+  /* a pointer that travels to whatever the beat is about to press */
+  ui.cursor = doc.createElement('div');
+  ui.cursor.style.cssText =
+    'position:fixed;left:0;top:0;z-index:9999;pointer-events:none;opacity:0;will-change:transform;';
+  ui.cursor.innerHTML =
+    '<svg width="15" height="22" viewBox="0 0 15 22" aria-hidden="true">' +
+    '<path d="M1 1l11.6 11.6-5.3.6 2.9 6.1-2.4 1.1-2.9-6.2L1 18.6z" ' +
+    'fill="#1C1B1A" stroke="#FCFBF9" stroke-width="1.3" stroke-linejoin="round"/></svg>';
+  ui.ripple = doc.createElement('span');
+  ui.ripple.style.cssText =
+    'position:absolute;left:0;top:0;width:30px;height:30px;margin:-15px 0 0 -15px;border-radius:50%;' +
+    'border:2px solid #D8683F;opacity:0;';
+  ui.cursor.appendChild(ui.ripple);
+  doc.body.appendChild(ui.cursor);
   return true;
+}
+
+/* the five presses in the story: [time, element getter] */
+function clicks() {
+  return [
+    [2.5, () => ui.micTest],
+    [5.5, () => ui.echoToggle],
+    [6.9, () => ui.eq.querySelector('button[data-value="jelas"]')],
+    [9.55, () => ui.tabSettings],
+    [10.05, () => ui.autostart],
+  ];
+}
+
+function centre(el) {
+  const r = el.getBoundingClientRect();
+  return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 }
 
 function eqRects() {
@@ -338,9 +369,38 @@ function setTime(t) {
   /* frequency curve lifts once Clear is picked */
   const lift = easeOut(seg(t, 6.9, 7.6));
 
+  /* cursor: glide to the next target, arrive on the beat, ripple on the press */
+  const LEAD = 0.65;
+  const beats = clicks();
+  let pos = null;
+  let pressed = null;
+  for (const [at, get] of beats) {
+    const to = centre(get());
+    if (t >= at) {
+      pos = to;
+      pressed = at;
+      continue;
+    }
+    const prev = beats.find(([a]) => a === pressed);
+    const from = prev ? centre(prev[1]()) : { x: to.x + 54, y: to.y + 74 };
+    const k = easeInOut(seg(t, at - LEAD, at));
+    pos = { x: from.x + (to.x - from.x) * k, y: from.y + (to.y - from.y) * k };
+    break;
+  }
+  if (pos) {
+    ui.cursor.style.transform = `translate(${pos.x.toFixed(1)}px, ${pos.y.toFixed(1)}px)`;
+    ui.cursor.style.opacity = String(easeInOut(seg(t, 1.9, 2.15)));
+  }
+  const ink = ui.cursor.querySelector('path').style;
+  ink.fill = dark ? '#F3F0EA' : '#1C1B1A';
+  ink.stroke = dark ? '#141311' : '#FCFBF9';
+  const since = pressed === null ? 9 : t - pressed;
+  const pop = clamp01(1 - since / 0.36);
+  ui.ripple.style.opacity = String(since < 0.36 ? pop : 0);
+  ui.ripple.style.transform = `scale(${(0.25 + 1.35 * (1 - pop)).toFixed(3)})`;
+
   /* BEAT 5 — lockup */
-  bars.forEach((b, i) => {
-    const k = easeOut(seg(t, 11.9 + i * 0.05, 12.25 + i * 0.05));
+  bars.forEach((b, i) => {    const k = easeOut(seg(t, 11.9 + i * 0.05, 12.25 + i * 0.05));
     b.style.transform = 'scaleY(' + k.toFixed(3) + ')';
     b.style.opacity = String(k);
   });

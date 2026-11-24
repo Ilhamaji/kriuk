@@ -44,6 +44,13 @@ static AEC_ON: AtomicBool = AtomicBool::new(false);
 static EQ_PRESET: AtomicU8 = AtomicU8::new(0);
 /// Closing the window hides it instead of exiting, so the chain survives.
 static CLOSE_TO_TRAY: AtomicBool = AtomicBool::new(true);
+/// UI language for the strings Rust owns: tray menu and tooltip.
+static LANG_ID: AtomicBool = AtomicBool::new(false);
+
+struct TrayLabels {
+    open: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+}
 
 type ShownAt = Arc<Mutex<Instant>>;
 
@@ -151,14 +158,14 @@ fn start_meter(app: AppHandle, device: Option<String>) {
     if METER_RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
-    set_tray_status(&app, true);
+    set_tray_status(&app);
     std::thread::spawn(move || {
         if let Err(err) = run_meter(&app, device.as_deref()) {
             let _ = app.emit("kriuk://meter-error", err);
         }
         MONITOR_ON.store(false, Ordering::Relaxed);
         METER_RUNNING.store(false, Ordering::SeqCst);
-        set_tray_status(&app, false);
+        set_tray_status(&app);
     });
 }
 
@@ -178,10 +185,29 @@ fn set_close_to_tray(on: bool) {
 }
 
 /// The tray tooltip is the only sign that the chain is live while the popover is hidden.
-fn set_tray_status(app: &AppHandle, listening: bool) {
+fn set_tray_status(app: &AppHandle) {
     if let Some(tray) = app.tray_by_id("kriuk") {
-        let _ = tray.set_tooltip(Some(if listening { "Kriuk — listening" } else { "Kriuk" }));
+        let listening = METER_RUNNING.load(Ordering::SeqCst);
+        let indonesian = LANG_ID.load(Ordering::Relaxed);
+        let text = match (listening, indonesian) {
+            (true, true) => "Kriuk — mendengarkan",
+            (true, false) => "Kriuk — listening",
+            _ => "Kriuk",
+        };
+        let _ = tray.set_tooltip(Some(text));
     }
+}
+
+/// The webview owns the language choice, so it pushes it here for the tray strings.
+#[tauri::command]
+fn set_language(app: AppHandle, lang: String) {
+    let indonesian = lang == "id";
+    LANG_ID.store(indonesian, Ordering::Relaxed);
+    if let Some(labels) = app.try_state::<TrayLabels>() {
+        let _ = labels.open.set_text(if indonesian { "Buka Kriuk" } else { "Open Kriuk" });
+        let _ = labels.quit.set_text(if indonesian { "Keluar" } else { "Quit" });
+    }
+    set_tray_status(&app);
 }
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -229,6 +255,14 @@ fn set_autostart(on: bool) -> Result<(), String> {
     }
 }
 
+/// A Run entry holds an absolute path, so moving the exe leaves it dead. Rewrite
+/// it with the current path on every launch: one manual start repairs autostart.
+fn refresh_autostart() {
+    if get_autostart() {
+        let _ = set_autostart(true);
+    }
+}
+
 fn pick_device(host: &cpal::Host, wanted: Option<&str>) -> Result<cpal::Device, String> {
     if let Some(name) = wanted.filter(|n| !n.is_empty()) {
         if let Ok(devices) = host.input_devices() {
@@ -244,6 +278,21 @@ fn pick_device(host: &cpal::Host, wanted: Option<&str>) -> Result<cpal::Device, 
     }
     host.default_input_device()
         .ok_or_else(|| "no input device".to_string())
+}
+
+/// True when the monitor plays on the device the echo reference captures. Feeding
+/// the processed mic back into the canceller would subtract the user's own voice.
+fn monitor_is_reference(host: &cpal::Host, target: Option<&str>) -> bool {
+    let default = host.default_output_device().and_then(|d| d.name().ok());
+    same_device(target, default.as_deref())
+}
+
+fn same_device(target: Option<&str>, default: Option<&str>) -> bool {
+    match (target, default) {
+        (None, _) => true, // no explicit target: the monitor uses the default device
+        (Some(name), Some(def)) => name.eq_ignore_ascii_case(def),
+        (Some(_), None) => false,
+    }
 }
 
 fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
@@ -315,6 +364,17 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
         if live != reported {
             reported = live;
             let _ = app.emit("kriuk://monitor", live);
+        }
+
+        // Same device for monitor and reference: the canceller would hear its own
+        // output, so refuse the pair instead of eating the voice.
+        if live && monitor_is_reference(&host, monitor_target.as_deref()) {
+            if AEC_ON.swap(false, Ordering::Relaxed) {
+                let _ = app.emit(
+                    "kriuk://aec-error",
+                    "echo cancellation needs the processed audio on a different device",
+                );
+            }
         }
 
         std::thread::sleep(Duration::from_millis(50));
@@ -499,17 +559,16 @@ fn spawn_loopback(app: AppHandle, queue: Arc<Mutex<VecDeque<f32>>>) -> std::thre
     })
 }
 
-/// Captures what the speakers play, which is what the mic hears back.
+/// Captures what the speakers play, which is what the mic hears back. Always the
+/// default render device: the monitor target carries our own processed voice, so
+/// using it as the reference would cancel the user instead of the echo.
 fn run_loopback(queue: &Arc<Mutex<VecDeque<f32>>>) -> Result<(), String> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
     let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
-    let fallback = || enumerator.get_default_device(&Direction::Render);
-    let device = match MONITOR_DEVICE.lock().unwrap().clone() {
-        Some(name) => render_by_name(&enumerator, &name).or_else(|| fallback().ok()),
-        None => fallback().ok(),
-    }
-    .ok_or("no output device for echo reference")?;
+    let device = enumerator
+        .get_default_device(&Direction::Render)
+        .map_err(|e| e.to_string())?;
 
     let mut client = device.get_iaudioclient().map_err(|e| e.to_string())?;
     let channels = client
@@ -570,14 +629,6 @@ fn run_loopback(queue: &Arc<Mutex<VecDeque<f32>>>) -> Result<(), String> {
     Ok(())
 }
 
-fn render_by_name(enumerator: &wasapi::DeviceEnumerator, name: &str) -> Option<wasapi::Device> {
-    enumerator
-        .get_device_collection(&wasapi::Direction::Render)
-        .ok()?
-        .get_device_with_name(name)
-        .ok()
-}
-
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -596,7 +647,8 @@ fn main() {
             set_monitor,
             set_aec,
             set_eq,
-            set_output
+            set_output,
+            set_language
         ])
         .setup(|app| {
             let win = app.get_webview_window("main").expect("main window");
@@ -611,6 +663,11 @@ fn main() {
             let open = MenuItem::with_id(app, "open", "Open Kriuk", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&open, &quit])?;
+            app.manage(TrayLabels {
+                open: open.clone(),
+                quit: quit.clone(),
+            });
+            refresh_autostart();
 
             let tray_shown = shown.clone();
             TrayIconBuilder::with_id("kriuk")
@@ -665,4 +722,17 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("failed to run kriuk");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_device;
+
+    #[test]
+    fn monitor_on_the_default_device_is_the_echo_reference() {
+        assert!(same_device(None, Some("Speakers (Realtek)")));
+        assert!(same_device(Some("Speakers (Realtek)"), Some("speakers (realtek)")));
+        assert!(!same_device(Some("CABLE Input (VB-Audio)"), Some("Speakers (Realtek)")));
+        assert!(!same_device(Some("CABLE Input"), None));
+    }
 }

@@ -238,6 +238,7 @@ function applyLang() {
   });
   $('#reduction-label').textContent = t(`reduction_${state.reduction}`);
   $('#eq-label').textContent = t(`eq_${state.eq}`);
+  invoke('set_language', { lang }).catch(() => {}); // tray menu and tooltip live in Rust
   renderStatus();
 }
 
@@ -383,6 +384,16 @@ function spkLabel() {
 
 bindToggle('#spk-toggle', 'spk', (on) => {
   spkNotice = '';
+  // Echo cancellation needs a speaker that does not carry the processed mic.
+  if (on && state.aec && !spkLabel()) {
+    state.spk = false;
+    $('#spk-toggle').classList.remove('is-on');
+    $('#spk-toggle').setAttribute('aria-checked', 'false');
+    spkNotice = lang === 'id' ? 'Pilih output lain dulu' : 'Pick a different output first';
+    renderStatus();
+    saveChain();
+    return;
+  }
   renderStatus();
   saveChain();
   invoke('set_monitor', { on }).catch(() => {});
@@ -398,6 +409,16 @@ $('#spk-device').addEventListener('change', () => {
 /* ---------- echo cancellation ---------- */
 bindToggle('#echo-toggle', 'aec', (on) => {
   aecNotice = '';
+  // The canceller must not hear its own monitor output, or it cancels the voice.
+  if (on && state.spk && !spkLabel()) {
+    state.aec = false;
+    $('#echo-toggle').classList.remove('is-on');
+    $('#echo-toggle').setAttribute('aria-checked', 'false');
+    aecNotice = lang === 'id' ? 'Pilih output lain dulu' : 'Pick a different output first';
+    renderStatus();
+    saveChain();
+    return;
+  }
   renderStatus();
   saveChain();
   invoke('set_aec', { on }).catch(() => {});
@@ -407,7 +428,14 @@ bindToggle('#echo-toggle', 'aec', (on) => {
 listen('kriuk://aec-error', (event) => {
   console.warn('aec:', event.payload);
   state.aec = false;
-  aecNotice = lang === 'id' ? 'Tidak tersedia' : 'Not available';
+  aecNotice =
+    lang === 'id'
+      ? state.spk
+        ? 'Butuh output berbeda'
+        : 'Tidak tersedia'
+      : state.spk
+        ? 'Needs a different output'
+        : 'Not available';
   $('#echo-toggle').classList.remove('is-on');
   $('#echo-toggle').setAttribute('aria-checked', 'false');
   renderStatus();

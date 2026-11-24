@@ -30,14 +30,14 @@ that ships inside the binary, and nothing leaves the device.
 |---|---|
 | Mic noise cancellation | RNNoise (`nnnoiseless`) at 48 kHz, 10 ms frames, on the WASAPI audio thread |
 | Reduction level | Light / Balanced / Maximum = 40 / 75 / 100 % wet mix |
-| Echo cancellation | Partitioned block frequency-domain adaptive filter (`rustfft`), 4 partitions × 480 samples ≈ 40 ms, reference from a WASAPI speaker loopback, Geigel double-talk guard |
+| Echo cancellation | Partitioned block frequency-domain adaptive filter (`rustfft`), 4 partitions × 480 samples ≈ 40 ms, reference from a WASAPI loopback of the default output device, Geigel double-talk guard |
 | Equalizer | RBJ biquads: Neutral (true bypass), Clear, Warm, and Auto, which measures the 300 Hz / 3 kHz band balance twice a second and tilts the curve, clamped to ±4–5 dB |
 | Level meter | Peak level of the processed signal, 12 bars |
 | Runs in the tray | The chain keeps running when the panel is hidden or closed; the tray tooltip reads *Kriuk — listening* while it does |
-| Start with Windows | A `HKCU` Run entry that launches the app with `--hidden`, so signing in does not open the popover |
+| Start with Windows | A `HKCU` Run entry that launches the app with `--hidden`, so signing in does not open the popover; the entry is rewritten on every launch, so moving the exe repairs it |
 | Close to tray | Closing the window hides it instead of quitting; **Quit** in the tray menu still exits |
 | Send result to | Plays the processed audio on a chosen output device, including a virtual audio cable |
-| Language | English by default, Indonesian available in Settings |
+| Language | English by default, Indonesian available in Settings; the tray menu and tooltip follow the choice |
 | Appearance | Light or dark, follows the system theme on first run |
 
 Processing order: echo cancellation → denoiser → equalizer → meter / routing.
@@ -145,6 +145,12 @@ not stop it.
 the close really did exit. Turn it back on, or use **Quit** in the tray menu when
 you do want to exit.
 
+**Echo cancellation turns itself off when Send result to uses the default speaker.**
+The canceller listens to the default output device, so routing the processed mic
+back into that same device would make it subtract your own voice. Send the result
+to a virtual cable (or any output other than the default) and echo cancellation
+stays on.
+
 **Echo is still there.** Echo cancellation can only subtract what the selected
 output device actually plays; a headset on a different device gives it no
 reference. It also needs a second or two to converge after you start the chain.
@@ -165,13 +171,10 @@ microphone again on the next start.
 
 ## Limitations
 
-- **Start with Windows** records the path of the executable at the moment you
-  enable it. Move `Kriuk.exe` afterwards and the entry points at nothing —
-  toggle the switch off and on again.
 - Echo cancellation is validated on synthetic signals, not yet measured in a
   real room, and the loopback reference cannot model a speaker that is not the
-  selected output device.
-- The tray menu and the tray tooltip are English only.
+  default output device. It also refuses to run while **Send result to** uses
+  that same device, because it would cancel the voice instead of the echo.
 - Unsigned binary, so expect the SmartScreen prompt on first run.
 
 ## Contributing

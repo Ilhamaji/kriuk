@@ -39,7 +39,8 @@ const SFX = [
   ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 5.5, 0.3],  // echo on
   ['sine=f=1700:d=0.05,afade=t=out:st=0.004:d=0.045', 6.9, 0.26], // eq clear
   ['sine=f=1100:d=0.08,afade=t=out:st=0.006:d=0.07', 8.6, 0.3],   // theme dark
-  ['sine=f=1300:d=0.05,afade=t=out:st=0.004:d=0.045', 9.55, 0.24],// language
+  ['sine=f=1300:d=0.05,afade=t=out:st=0.004:d=0.045', 9.55, 0.24],// language + settings
+  ['sine=f=1250:d=0.05,afade=t=out:st=0.004:d=0.045', 10.05, 0.2],// autostart on
   ['anoisesrc=d=0.9:c=pink:r=44100,highpass=f=500,lowpass=f=7000,afade=t=in:st=0:d=0.3,afade=t=out:st=0.35:d=0.55', 11.7, 0.16], // whoosh into lockup
   ['sine=f=660:d=0.22,afade=t=out:st=0.02:d=0.2', 12.35, 0.28],   // lockup pop
 ];

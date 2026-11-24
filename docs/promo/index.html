@@ -74,7 +74,7 @@
     position: absolute;
     left: 0;
     right: 0;
-    top: 1570px;
+    top: 700px;
     text-align: center;
   }
   .lockup .bars {
@@ -115,6 +115,64 @@
     letter-spacing: 0.2px;
     opacity: 0;
   }
+
+  /* the opening question, before the popover exists */
+  .bridge {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 640px;
+    height: 500px;
+    z-index: 3;
+    pointer-events: none;
+  }
+  .bstack {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 14px;
+  }
+  .bq {
+    font-size: 54px;
+    font-weight: 600;
+    letter-spacing: -1.2px;
+    line-height: 1.2;
+    color: var(--ink);
+    opacity: 0;
+    will-change: opacity, transform;
+  }
+  .bq b { color: var(--terracotta); font-weight: 700; }
+  .bstack .intro {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 34px;
+    text-align: center;
+    font-size: 34px;
+    font-weight: 500;
+    letter-spacing: -0.3px;
+    color: var(--muted);
+    opacity: 0;
+  }
+  .bstack .wordmark {
+    font-size: 92px;
+    font-weight: 700;
+    letter-spacing: -3px;
+    line-height: 1;
+    color: var(--ink);
+    opacity: 0;
+  }
+  .bstack .wordmark em { font-style: normal; color: var(--terracotta); }
+  .bstack .bsub {
+    margin-top: 10px;
+    font-size: 24px;
+    color: var(--muted);
+    letter-spacing: -0.2px;
+    opacity: 0;
+  }
 </style>
 </head>
 <body>
@@ -126,6 +184,19 @@
     <path class="clean" id="clean" d="" />
   </svg>
 
+  <div class="bridge" id="bridge">
+    <div class="bstack" id="bridgeQ">
+      <div class="bq" id="bq1">Mic kamu <b>berisik</b></div>
+      <div class="bq" id="bq2">saat main game online</div>
+      <div class="bq" id="bq3">atau <b>meeting online?</b></div>
+    </div>
+    <div class="bstack" id="bridgeCta">
+      <div class="intro" id="bIntro">Perkenalkan.</div>
+      <div class="wordmark" id="bWord">kriuk<em>.</em></div>
+      <div class="bsub" id="bSub">Pembersih suara mikrofon · Windows 10/11</div>
+    </div>
+  </div>
+
   <div class="hero" id="hero">
     <iframe id="app" src="/src/index.html" title="Kriuk"></iframe>
   </div>
@@ -133,8 +204,8 @@
   <div class="lockup" id="lockup">
     <div class="bars" id="lockBars"></div>
     <div class="name" id="lockName">kriuk<em>.</em></div>
-    <div class="tag" id="lockTag">Your quiet room, always on.</div>
-    <div class="sub" id="lockSub">Free and open source · Windows 10/11</div>
+    <div class="tag" id="lockTag">Suaramu jernih, selalu.</div>
+    <div class="sub" id="lockSub">Gratis dan open source · Windows 10/11</div>
   </div>
 </div>
 
@@ -144,7 +215,7 @@ const seg = (t, a, b) => clamp01((t - a) / (b - a));
 const easeOut = (x) => 1 - Math.pow(1 - x, 3);
 const easeInOut = (x) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
 
-const DURATION = 15;
+const DURATION = 30;
 const stage = document.getElementById('stage');
 const hero = document.getElementById('hero');
 const frame = document.getElementById('app');
@@ -154,6 +225,10 @@ const lockName = document.getElementById('lockName');
 const lockTag = document.getElementById('lockTag');
 const lockSub = document.getElementById('lockSub');
 const lockBars = document.getElementById('lockBars');
+const bq = ['bq1', 'bq2', 'bq3'].map((id) => document.getElementById(id));
+const bIntro = document.getElementById('bIntro');
+const bWord = document.getElementById('bWord');
+const bSub = document.getElementById('bSub');
 
 /* logo bars for the lockup: same 5-bar mark as the app */
 const BAR_H = [26, 40, 56, 40, 26];
@@ -208,13 +283,41 @@ function ready() {
     eq: doc.getElementById('eq-presets'),
     eqLabel: doc.getElementById('eq-label'),
     langId: doc.querySelector('#lang button[data-value="id"]'),
+    langEn: doc.querySelector('#lang button[data-value="en"]'),
     themeDark: doc.querySelector('#theme button[data-value="dark"]'),
+    themeLight: doc.querySelector('#theme button[data-value="light"]'),
     tabAudio: doc.querySelector('.tab[data-tab="audio"]'),
+    tabActivity: doc.querySelector('.tab[data-tab="activity"]'),
     tabSettings: doc.querySelector('.tab[data-tab="settings"]'),
     autostart: doc.getElementById('autostart-toggle'),
     check: doc.querySelector('.banner-check svg path'),
     root: doc.documentElement,
   };
+
+  /* the activity tab is a session log, so the story needs entries in it */
+  const list = doc.getElementById('activity-list');
+  for (const [when, peak] of [
+    ['20:31', '-18 dB'],
+    ['20:27', '-21 dB'],
+    ['20:22', '-17 dB'],
+    ['20:19', '-24 dB'],
+    ['20:14', '-20 dB'],
+    ['20:11', '-22 dB'],
+    ['20:07', '-19 dB'],
+    ['20:03', '-26 dB'],
+  ]) {
+    const li = doc.createElement('li');
+    const w = doc.createElement('span');
+    w.className = 'when';
+    w.textContent = when;
+    const v = doc.createElement('span');
+    v.className = 'peak';
+    v.textContent = peak;
+    li.append(w, v);
+    list.appendChild(li);
+  }
+  doc.getElementById('activity-empty').style.display = 'none';
+  ui.activityRows = Array.from(list.children);
   /* the app remembers language and theme, so pin the opening state explicitly */
   const en = doc.querySelector('#lang button[data-value="en"]');
   const light = doc.querySelector('#theme button[data-value="light"]');
@@ -243,14 +346,16 @@ function ready() {
   return true;
 }
 
-/* the five presses in the story: [time, element getter] */
+/* the presses in the story: [time, element getter] */
 function clicks() {
   return [
-    [3.4, () => ui.micTest],
-    [6.1, () => ui.echoToggle],
-    [7.4, () => ui.eq.querySelector('button[data-value="jelas"]')],
-    [9.45, () => ui.tabSettings],
-    [10.5, () => ui.autostart],
+    [7.9, () => ui.micTest],
+    [12.0, () => ui.echoToggle],
+    [14.0, () => ui.eq.querySelector('button[data-value="jelas"]')],
+    [17.2, () => ui.tabSettings],
+    [18.3, () => ui.langId],
+    [19.5, () => ui.autostart],
+    [21.9, () => ui.tabActivity],
   ];
 }
 
@@ -267,34 +372,64 @@ function eqRects() {
 function setTime(t) {
   if (!doc && !ready()) return;
 
+  /* BRIDGE — the question, then the introduction */
+  const at = [-0.2, 1.0, 1.8];
+  bq.forEach((el, i) => {
+    const rise = easeOut(seg(t, at[i], at[i] + 0.4));
+    const away = easeOut(seg(t, 3.5, 3.85));
+    el.style.opacity = String(rise * (1 - away));
+    el.style.transform = 'translateY(' + (14 * (1 - rise) + 12 * away).toFixed(1) + 'px)';
+  });
+  const introIn = easeOut(seg(t, 3.75, 4.15));
+  const introOut = easeOut(seg(t, 4.95, 5.25));
+  bIntro.style.opacity = String(introIn * (1 - introOut));
+  bIntro.style.transform = 'translateY(' + (12 * (1 - introIn)).toFixed(1) + 'px)';
+  const ctaOut = easeOut(seg(t, 6.3, 6.65));
+  const wordIn = easeOut(seg(t, 5.05, 5.55));
+  bWord.style.opacity = String(wordIn * (1 - ctaOut));
+  bWord.style.transform = 'translateY(' + (10 * (1 - wordIn)).toFixed(1) + 'px)';
+  const bSubIn = easeOut(seg(t, 5.45, 5.9));
+  bSub.style.opacity = String(bSubIn * (1 - ctaOut));
+
   /* BEAT 4 — theme, language and the tray settings the story is now about */
-  const dark = t >= 8.6;
+  const dark = t >= 16.2;
   ui.root.setAttribute('data-theme', dark ? 'dark' : 'light');
   stage.classList.toggle('is-dark', dark);
-  if (t >= 9.45 && !ui.langId.classList.contains('is-active')) ui.langId.click();
-  else if (t < 9.45 && ui.langId.classList.contains('is-active')) ui.langId.click();
-  const onSettings = t >= 9.45;
-  const onSettingsTab = ui.tabSettings.classList.contains('is-active');
-  if (onSettings !== onSettingsTab) (onSettings ? ui.tabSettings : ui.tabAudio).click();
+  ui.themeLight.classList.toggle('is-active', !dark);
+  ui.themeDark.classList.toggle('is-active', dark);
+
+  const indonesian = t >= 18.3;
+  if (indonesian !== ui.langId.classList.contains('is-active')) {
+    (indonesian ? ui.langId : ui.langEn).click();
+  }
+
+  /* one tab at a time, so the story never jumps backwards */
+  const tab = t >= 21.9 ? 'activity' : t >= 17.2 ? 'settings' : 'audio';
+  const shown = doc.querySelector('.tab.is-active');
+  if (!shown || shown.dataset.tab !== tab) {
+    doc.querySelector('.tab[data-tab="' + tab + '"]').click();
+  }
+
   /* the tray settings land as the caption names them */
-  const autoOn = t >= 10.5;
+  const autoOn = t >= 19.5;
   ui.autostart.classList.toggle('is-on', autoOn);
   ui.autostart.setAttribute('aria-checked', String(autoOn));
 
   /* BEAT 1 — the popover arrives */
-  const enter = easeOut(seg(t, 0.1, 0.55));
-  const pulse = t > 0.9 && t < 1.7 ? 1 + 0.12 * Math.sin(seg(t, 0.9, 1.7) * Math.PI) : 1;
+  const enter = easeOut(seg(t, 6.9, 7.5));
+  const pulse = t > 7.5 && t < 8.3 ? 1 + 0.12 * Math.sin(seg(t, 7.5, 8.3) * Math.PI) : 1;
 
-  /* BEAT 5 — panel steps back for the lockup */
-  const outro = easeInOut(seg(t, 11.5, 12.4));
+  /* BEAT 6 — panel steps back for the lockup */
+  const outro = easeInOut(seg(t, 24.6, 25.5));
 
   /* camera: push in on the control under discussion, then settle back.
      zoom about the hero centre plus a compensating pan keeps the target centred. */
   const HERO_H = 1342;
   const FOCUS = [
-    { t0: 2.6, t1: 5.5, s: 1.12, p: 0.72 },  // meter card
-    { t0: 5.5, t1: 8.35, s: 1.1, p: 0.55 },  // echo row + equalizer
-    { t0: 9.0, t1: 11.4, s: 1.07, p: 0.5 },  // tray settings
+    { t0: 8.4, t1: 11.8, s: 1.12, p: 0.72 },  // meter card
+    { t0: 12.2, t1: 15.6, s: 1.1, p: 0.55 },  // echo row + equalizer
+    { t0: 16.4, t1: 20.8, s: 1.07, p: 0.5 },  // tray settings
+    { t0: 21.6, t1: 24.4, s: 1.06, p: 0.5 },  // activity log
   ];
   let zoom = 1;
   let pan = 0;
@@ -308,14 +443,14 @@ function setTime(t) {
     pan = Math.max(pan, -(190 - (HERO_H / 2) * (zoom - 1)));
   }
 
-  hero.style.opacity = String(enter * (1 - 0.55 * outro));
+  hero.style.opacity = String(enter * (1 - outro));
   hero.style.transform =
     'translateY(' + (24 * (1 - enter) + 40 * outro + pan).toFixed(2) + 'px)' +
     ' scale(' + (pulse * (1 - 0.08 * outro) * zoom).toFixed(4) + ')';
 
   /* BEAT 2 — the chain is running */
-  const testing = t >= 3.4 && t < 11.5;
-  const id = ui.langId.classList.contains('is-active');
+  const testing = t >= 7.9 && t < 24.4;
+  const id = indonesian;
   ui.micTest.classList.toggle('is-live', testing);
   ui.micTest.textContent = testing ? (id ? 'Hentikan' : 'Stop') : (id ? 'Mulai' : 'Start');
   ui.meterState.textContent = testing
@@ -331,23 +466,23 @@ function setTime(t) {
   ui.meterBars.forEach((b, i) => b.classList.toggle('on', i < lit));
 
   /* banner check draws once the chain is live */
-  const draw = easeInOut(seg(t, 3.5, 3.95));
+  const draw = easeInOut(seg(t, 8.0, 8.45));
   ui.check.style.strokeDasharray = '24';
   ui.check.style.strokeDashoffset = String(24 * (1 - draw));
 
   /* noisy waveform settles into a clean line */
-  const settle = easeInOut(seg(t, 3.5, 4.5));
+  const settle = easeInOut(seg(t, 8.0, 9.0));
   noisy.setAttribute('d', wavePath(1.7 * (1 - settle), t * 1.2));
   clean.setAttribute('d', calmPath(t * 0.9));
   clean.style.opacity = String(settle);
 
   /* BEAT 3 — echo cancellation and equalizer */
-  const echoOn = t >= 6.1;
+  const echoOn = t >= 12.0;
   ui.echoToggle.classList.toggle('is-on', echoOn);
   ui.echoToggle.setAttribute('aria-checked', echoOn ? 'true' : 'false');
   ui.echoSub.textContent = echoOn ? (id ? 'Gema speaker dihapus' : 'Speaker echo removed') : (id ? 'Mati' : 'Off');
 
-  const eqTo = t >= 7.4;
+  const eqTo = t >= 14.0;
   const kids = Array.from(ui.eq.children).filter((n) => n.tagName === 'BUTTON');
   kids.forEach((b, i) => b.classList.toggle('is-active', i === (eqTo ? 1 : 0)));
   ui.eqLabel.textContent = id
@@ -357,18 +492,15 @@ function setTime(t) {
   /* ghost pill slides from Neutral to Clear */
   const rects = eqRects();
   if (rects.length >= 2) {
-    const k = easeInOut(seg(t, 7.05, 7.4));
+    const k = easeInOut(seg(t, 13.65, 14.0));
     const a = rects[0];
     const b = rects[1];
     ghost.style.top = a.top + 'px';
     ghost.style.height = a.height + 'px';
     ghost.style.left = (a.left + (b.left - a.left) * k) + 'px';
     ghost.style.width = (a.width + (b.width - a.width) * k) + 'px';
-    ghost.style.opacity = String(t > 6.95 && t < 7.55 ? 0.9 * (1 - Math.abs(k - 0.5) * 1.2) : 0);
+    ghost.style.opacity = String(t > 13.55 && t < 14.15 ? 0.9 * (1 - Math.abs(k - 0.5) * 1.2) : 0);
   }
-
-  /* frequency curve lifts once Clear is picked */
-  const lift = easeOut(seg(t, 7.4, 8.1));
 
   /* cursor: glide to the next target, arrive on the beat, ripple on the press */
   const LEAD = 0.55;
@@ -390,7 +522,7 @@ function setTime(t) {
   }
   if (pos) {
     ui.cursor.style.transform = `translate(${pos.x.toFixed(1)}px, ${pos.y.toFixed(1)}px)`;
-    ui.cursor.style.opacity = String(easeInOut(seg(t, 2.75, 3.05)));
+    ui.cursor.style.opacity = String(easeInOut(seg(t, 7.25, 7.55)) * (1 - seg(t, 23.3, 23.7)));
   }
   const ink = ui.cursor.querySelector('path').style;
   ink.fill = dark ? '#F3F0EA' : '#1C1B1A';
@@ -400,18 +532,26 @@ function setTime(t) {
   ui.ripple.style.opacity = String(since < 0.36 ? pop : 0);
   ui.ripple.style.transform = `scale(${(0.25 + 1.35 * (1 - pop)).toFixed(3)})`;
 
-  /* BEAT 5 — lockup */
-  bars.forEach((b, i) => {    const k = easeOut(seg(t, 11.9 + i * 0.05, 12.25 + i * 0.05));
+  /* BEAT 5 — the session log fills in, newest first */
+  ui.activityRows.forEach((row, i) => {
+    const k = easeOut(seg(t, 21.95 + i * 0.08, 22.3 + i * 0.08));
+    row.style.opacity = String(k);
+    row.style.transform = 'translateY(' + (10 * (1 - k)).toFixed(1) + 'px)';
+  });
+
+  /* BEAT 6 — lockup */
+  bars.forEach((b, i) => {
+    const k = easeOut(seg(t, 25.7 + i * 0.05, 26.05 + i * 0.05));
     b.style.transform = 'scaleY(' + k.toFixed(3) + ')';
     b.style.opacity = String(k);
   });
-  const nameIn = easeOut(seg(t, 12.35, 12.75));
+  const nameIn = easeOut(seg(t, 26.15, 26.55));
   lockName.style.opacity = String(nameIn);
   lockName.style.transform = 'translateY(' + (8 * (1 - nameIn)).toFixed(1) + 'px)';
-  const tagIn = easeOut(seg(t, 12.75, 13.15));
+  const tagIn = easeOut(seg(t, 26.55, 26.95));
   lockTag.style.opacity = String(tagIn);
-  const subIn = easeOut(seg(t, 13.15, 13.55));
-  lockSub.style.opacity = String(subIn);
+  const lockSubIn = easeOut(seg(t, 26.95, 27.35));
+  lockSub.style.opacity = String(lockSubIn);
 }
 
 window.__setTime = setTime;

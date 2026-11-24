@@ -11,7 +11,7 @@ const FF = [
 ].find(existsSync) || 'ffmpeg';
 
 const FPS = 30;
-const DURATION = 15;
+const DURATION = 30;
 const ROOT = process.cwd();
 const FRAMES = path.join(ROOT, 'docs/promo/frames');
 const OUT = path.join(ROOT, 'docs/promo.mp4');
@@ -21,10 +21,11 @@ if (frames < FPS * DURATION) throw new Error(`only ${frames}/${FPS * DURATION} f
 
 /* captions: [text, in, out, colour] — colour flips to a light tone on the dark beat */
 const captions = [
-  ['KRIUK \u2014 WINDOWS TRAY AUDIO', 0.7, 2.4, '0x6E6A65'],
-  ['ONE CLICK \u00b7 CLEANER VOICE', 3.55, 5.6, '0x6E6A65'],
-  ['ECHO CANCELLED \u00b7 CLEAR EQ', 6.25, 8.4, '0x6E6A65'],
-  ['RUNS IN TRAY \u00b7 STARTS WITH WINDOWS', 8.9, 11.3, '0xA6A099'],
+  ['SATU KLIK \u00b7 SUARA LEBIH BERSIH', 8.7, 11.5, '0x6E6A65'],
+  ['GEMA HILANG \u00b7 EQ LEBIH JELAS', 12.5, 15.6, '0x6E6A65'],
+  ['TEMA GELAP \u00b7 DUA BAHASA', 16.5, 19.2, '0xA6A099'],
+  ['MULAI DENGAN WINDOWS \u00b7 TETAP DI TRAY', 19.7, 21.7, '0xA6A099'],
+  ['RIWAYAT TES \u00b7 TANPA REKAMAN', 22.1, 24.5, '0xA6A099'],
 ];
 
 const draw = captions.map(([text, from, to, color]) =>
@@ -34,15 +35,18 @@ const draw = captions.map(([text, from, to, color]) =>
 
 /* one-shot effects: [lavfi source, start, gain] */
 const SFX = [
-  ['sine=f=520:d=0.2,afade=t=out:st=0.02:d=0.18', 0.12, 0.5],    // panel lands
-  ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 3.4, 0.32], // chain starts
-  ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 6.1, 0.3],  // echo on
-  ['sine=f=1700:d=0.05,afade=t=out:st=0.004:d=0.045', 7.4, 0.26], // eq clear
-  ['sine=f=1100:d=0.08,afade=t=out:st=0.006:d=0.07', 8.6, 0.3],   // theme dark
-  ['sine=f=1300:d=0.05,afade=t=out:st=0.004:d=0.045', 9.45, 0.24],// language + settings
-  ['sine=f=1250:d=0.05,afade=t=out:st=0.004:d=0.045', 10.5, 0.2], // autostart on
-  ['anoisesrc=d=0.9:c=pink:r=44100,highpass=f=500,lowpass=f=7000,afade=t=in:st=0:d=0.3,afade=t=out:st=0.35:d=0.55', 11.7, 0.16], // whoosh into lockup
-  ['sine=f=660:d=0.22,afade=t=out:st=0.02:d=0.2', 12.35, 0.28],   // lockup pop
+  ['sine=f=90:d=0.4,afade=t=out:st=0.03:d=0.36', 0.42, 0.34],      // the question lands
+  ['sine=f=120:d=0.3,afade=t=out:st=0.03:d=0.26', 3.72, 0.26],     // "perkenalkan"
+  ['sine=f=520:d=0.2,afade=t=out:st=0.02:d=0.18', 6.88, 0.5],      // panel lands
+  ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 7.86, 0.32], // chain starts
+  ['sine=f=1500:d=0.06,afade=t=out:st=0.004:d=0.055', 11.96, 0.3], // echo on
+  ['sine=f=1700:d=0.05,afade=t=out:st=0.004:d=0.045', 13.96, 0.26],// eq clear
+  ['sine=f=1100:d=0.08,afade=t=out:st=0.006:d=0.07', 16.16, 0.3],  // theme dark
+  ['sine=f=1300:d=0.05,afade=t=out:st=0.004:d=0.045', 18.26, 0.24],// language
+  ['sine=f=1250:d=0.05,afade=t=out:st=0.004:d=0.045', 19.46, 0.2], // autostart on
+  ['sine=f=1400:d=0.05,afade=t=out:st=0.004:d=0.045', 21.86, 0.22],// activity tab
+  ['anoisesrc=d=0.9:c=pink:r=44100,highpass=f=500,lowpass=f=7000,afade=t=in:st=0:d=0.3,afade=t=out:st=0.35:d=0.55', 24.6, 0.16], // whoosh into lockup
+  ['sine=f=660:d=0.22,afade=t=out:st=0.02:d=0.2', 25.55, 0.28],    // lockup pop
 ];
 
 /* BGM: a four-chord pad that crossfades every 3.75 s, a soft plucked arp and air.
@@ -54,6 +58,7 @@ const CHORDS = [
   [220.0, 261.63, 329.63, 392.0],  // Am7
 ];
 const CHORD_AT = 3.5;
+const CHORD_COUNT = Math.ceil(DURATION / CHORD_AT);
 
 const input = ['-y', '-framerate', String(FPS), '-i', path.join(FRAMES, 'frame-%04d.png')];
 const filters = [];
@@ -67,7 +72,8 @@ const addLavfi = (src, filter, label) => {
   next++;
 };
 
-CHORDS.forEach((freqs, i) => {
+for (let i = 0; i < CHORD_COUNT; i++) {
+  const freqs = CHORDS[i % CHORDS.length];
   const wave = freqs.map((f, k) => `${(0.3 - k * 0.04).toFixed(2)}*sin(2*PI*${f}*t)`).join('+');
   const expr = `(${wave})*(0.8+0.2*sin(2*PI*0.15*t))`;
   addLavfi(
@@ -77,7 +83,7 @@ CHORDS.forEach((freqs, i) => {
       `adelay=${Math.round(i * CHORD_AT * 1000)}|${Math.round(i * CHORD_AT * 1000)}`,
     `pad${i}`
   );
-});
+}
 
 addLavfi(
   `aevalsrc='0.06*sin(2*PI*659.25*t)*exp(-7*mod(t\\,0.75))':d=${DURATION}:s=44100`,

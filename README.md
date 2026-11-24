@@ -16,7 +16,7 @@ cleaning your voice after the panel is hidden or closed.
 
 <img src="docs/screenshot.png" width="320" alt="Kriuk popover, Audio tab, light theme">
 
-▶ [15-second demo](docs/promo.mp4) — captions tell the story, so it works muted.
+▶ [30-second demo](docs/promo.mp4) — vertical 9:16, captions tell the story, so it works muted.
 
 ## Why
 

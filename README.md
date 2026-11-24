@@ -1,17 +1,27 @@
 # Kriuk
 
 [![build](https://github.com/Ilhamaji/kriuk/actions/workflows/build.yml/badge.svg)](https://github.com/Ilhamaji/kriuk/actions/workflows/build.yml)
+[![release](https://img.shields.io/github/v/release/Ilhamaji/kriuk?display_name=tag&sort=semver)](https://github.com/Ilhamaji/kriuk/releases/latest)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-lightgrey.svg)](#requirements)
 
-Tray audio utility for Windows that cleans a microphone signal: RNNoise
-denoising, echo cancellation, and a voice equalizer, with a live level meter
-and routing to any output device.
+Tray audio utility for Windows that cleans your microphone: RNNoise denoising,
+echo cancellation from the speaker loopback, and a voice equalizer — with a live
+level meter and routing to any output device.
 
-Pure Rust on Tauri v2. One ~6 MB executable, no Electron, no Node at runtime,
-no background service.
+Pure Rust on Tauri v2. One ~6 MB executable, no Electron, no Node at runtime, no
+background service, no account.
 
-<img src="docs/screenshot.png" width="320" alt="Kriuk main window">
+<img src="docs/screenshot.png" width="320" alt="Kriuk popover, Audio tab, light theme">
+
+▶ [15-second demo](docs/promo.mp4) — captions tell the story, so it works muted.
+
+## Why
+
+Most noise-suppression tools are subscriptions that push your voice through
+someone else's server. Kriuk does the same job on the same machine that already
+has your microphone: the DSP runs on the audio callback, the UI is a webview
+that ships inside the binary, and nothing leaves the device.
 
 ## Features
 
@@ -21,7 +31,7 @@ no background service.
 | Reduction level | Light / Balanced / Maximum = 40 / 75 / 100 % wet mix |
 | Echo cancellation | Partitioned block frequency-domain adaptive filter (`rustfft`), 4 partitions × 480 samples ≈ 40 ms, reference from a WASAPI speaker loopback, Geigel double-talk guard |
 | Equalizer | RBJ biquads: Neutral (true bypass), Clear, Warm, and Auto, which measures the 300 Hz / 3 kHz band balance twice a second and tilts the curve, clamped to ±4–5 dB |
-| Level meter | Peak level of the processed signal |
+| Level meter | Peak level of the processed signal, 12 bars |
 | Send result to | Plays the processed audio on a chosen output device, including a virtual audio cable |
 | Language | English by default, Indonesian available in Settings |
 | Appearance | Light or dark, follows the system theme on first run |
@@ -30,60 +40,62 @@ Processing order: echo cancellation → denoiser → equalizer → meter / routi
 A disabled stage costs one atomic load per frame; no extra thread, no extra
 stream.
 
-Measured on the development laptop: 0 % CPU idle, ~4.7 % with the full chain
-plus echo cancellation, ~32 MB RAM.
+## Quick start
+
+1. Download [`Kriuk.exe`](https://github.com/Ilhamaji/kriuk/releases/latest/download/Kriuk.exe) and run it. The window is a popover anchored to the tray icon.
+2. Pick a microphone and press **Test mic**; the meter shows the processed level.
+3. Turn on **Echo cancellation** if your speakers leak into the mic.
+4. To feed another app (Zoom, Meet, Discord), set **Send result to** to a virtual cable such as VB-CABLE or VoiceMeeter, then choose that cable as the microphone in the other app. Windows has no way to inject audio into another app's mic without a virtual device.
+
+Hiding the popover stops the chain and closes the microphone.
+
+## Install
+
+No installer. The file is the app: put it anywhere, run it, and deleting it
+removes the app. There is no service, driver, or registry entry.
+
+The binary is not code-signed, so Windows SmartScreen shows "Windows protected
+your PC" on first run — choose **More info → Run anyway**. A code-signing
+certificate is the only way to remove that prompt.
+
+Releases are built by GitHub Actions from the tag; see
+[`.github/workflows/build.yml`](.github/workflows/build.yml).
 
 ## Requirements
 
 - Windows 10 1809 or newer, or Windows 11
 - WebView2 Runtime — preinstalled on Windows 11 and on most Windows 10 machines
 
-## Install
+## Performance
 
-Download `Kriuk.exe` from [Releases](../../releases) and run it. There is no
-installer: the app lives in the tray, and deleting the file removes it.
-
-The build is not code-signed, so Windows SmartScreen shows
-"Windows protected your PC" on first run. Choose **More info → Run anyway**.
-A code-signing certificate is the only way to remove that prompt.
-
-## Usage
-
-1. Pick a microphone and leave **Microphone** on.
-2. Press **Test mic** to start the chain; the meter shows the processed level.
-3. **Echo cancellation** removes what your speaker plays from the mic signal.
-   It needs the chain running and the reference speaker selected under
-   **Send result to**.
-4. To feed other apps, set **Send result to** to a virtual cable such as
-   VB-CABLE or VoiceMeeter, then set that cable as the microphone in the other
-   app. Windows has no way to inject audio into another app's mic without a
-   virtual device.
-
-Hiding the popover stops the chain and closes the microphone.
+Measured on the development laptop with the full chain plus echo cancellation:
+0 % CPU idle, ~4.7 % while processing, ~32 MB RAM. The release profile uses LTO,
+one codegen unit, `panic = "abort"` and stripped symbols, which is why the
+executable stays near 6 MB.
 
 ## Build
 
-Requires the Rust MSVC toolchain and Visual Studio Build Tools with the
-Desktop C++ workload.
+Requires Rust 1.77 or newer with the MSVC toolchain, plus Visual Studio Build
+Tools with the Desktop C++ workload.
 
 ```powershell
 cargo build --release --manifest-path src-tauri\Cargo.toml
 ```
 
 The executable lands in `src-tauri\target\release\kriuk.exe`. The UI in `src/`
-is embedded into the binary at build time, so no separate asset step is needed.
+is embedded into the binary at build time, so there is no separate asset step.
 
-Tests cover the DSP, not the UI:
+## Tests
 
 ```powershell
 cargo test --manifest-path src-tauri\Cargo.toml
 ```
 
-They assert echo reduction of 10 dB or more across the whole 40 ms filter span,
-that double talk does not swallow the local voice, and that each equalizer
-preset moves the band it claims to.
+The tests cover the DSP, not the UI: echo reduction of 10 dB or more across the
+whole 40 ms filter span, double talk that does not swallow the local voice, and
+every equalizer preset moving the band it claims to.
 
-## How it works
+## Project layout
 
 ```
 speaker loopback ──┐
@@ -99,19 +111,48 @@ microphone ────────┘                                          
 | `src/index.html`, `src/styles.css`, `src/app.js` | popover UI, no framework |
 | `src-tauri/tauri.conf.json` | frameless transparent always-on-top window |
 | `tools/make-icon.js` | generates the icon set without dependencies |
+| `tools/serve.mjs`, `tools/render-promo.mjs`, `tools/build-video.mjs` | preview server and frame renderer for the demo video |
 | `DESIGN.md` | visual specification |
 | `REMAKE-RUST.md`, `REPORT.md` | reverse-engineering notes that led to this build |
 
+## Troubleshooting
+
+**No microphone in the list.** Windows blocks desktop apps from the mic unless
+*Settings → Privacy → Microphone → Let desktop apps access your microphone* is
+on. The list refreshes when you reopen the popover.
+
+**The meter moves but the other app hears nothing.** *Send result to* must point
+at the device the other app listens to — or at a virtual cable that the other
+app uses as its mic. The chain only runs while **Test mic** is active.
+
+**Echo is still there.** Echo cancellation can only subtract what the selected
+output device actually plays; a headset on a different device gives it no
+reference. It also needs a second or two to converge after you start the chain.
+
+**SmartScreen blocks the download.** Expected for an unsigned binary: *More info
+→ Run anyway*, or build it yourself.
+
+## Privacy
+
+No network code, no telemetry, no accounts, no audio written to disk. The
+activity list in the app is in-memory and disappears when the app closes.
+
 ## Limitations
 
-- The audio chain runs while the mic test is active. Continuous background
-  processing while the panel is hidden is not implemented yet.
+- The chain runs while the mic test is active. Continuous background processing
+  with the panel hidden is not implemented yet.
 - Echo cancellation is validated on synthetic signals, not yet measured in a
-  real room; the loopback reference also cannot model a speaker that is not the
+  real room, and the loopback reference cannot model a speaker that is not the
   selected output device.
 - The tray menu is English only.
-- Unsigned binary, so expect the SmartScreen prompt.
+- Unsigned binary, so expect the SmartScreen prompt on first run.
+
+## Contributing
+
+Issues and pull requests are welcome. Keep the DSP covered by `cargo test`, and
+run `cargo build --release` before opening a PR — CI builds and tests on
+`windows-latest`.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) © 2026 Ilhamaji

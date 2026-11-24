@@ -9,3 +9,7 @@
 # Tooling
 node_modules/
 *.log
+
+# Promo video: only the rendered mp4 is tracked, frames are regenerated
+/docs/promo/frames/
+/docs/promo/audio/

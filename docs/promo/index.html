@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Kriuk promo</title>
+<style>
+  :root {
+    --alabaster: #FCFBF9;
+    --sage: #EFF4E9;
+    --terracotta: #D8683F;
+    --ink: #1C1B1A;
+    --muted: #6E6A65;
+    --font: 'Inter', 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--alabaster); }
+  body { font-family: var(--font); color: var(--ink); overflow: hidden; }
+
+  .stage {
+    position: relative;
+    width: 1080px;
+    height: 1920px;
+    overflow: hidden;
+    background: radial-gradient(720px 720px at 540px 760px, #F2F6EC 0%, rgba(252, 251, 249, 0) 62%), var(--alabaster);
+  }
+  .glow {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(560px 560px at 540px 820px, rgba(239, 244, 233, 0.9) 0%, rgba(252, 251, 249, 0) 70%);
+  }
+  .band {
+    position: absolute;
+    left: 0;
+    top: 520px;
+    width: 1080px;
+    height: 320px;
+    opacity: 0.55;
+    z-index: 1;
+  }
+  .band path { fill: none; stroke-linecap: round; }
+  .band .noisy { stroke: #D8D3C9; stroke-width: 2.5; }
+  .band .clean { stroke: var(--terracotta); stroke-width: 3; opacity: 0; }
+
+  .stage.is-dark {
+    background: radial-gradient(720px 720px at 540px 760px, #1D241A 0%, rgba(20, 19, 17, 0) 62%), #141311;
+  }
+  .stage.is-dark .glow { opacity: 0; }
+  .stage.is-dark .band .noisy { stroke: #3A372F; }
+  .stage.is-dark .lockup .name { color: #F3F0EA; }
+  .stage.is-dark .lockup .tag { color: #A6A099; }
+  .stage.is-dark .lockup .sub { color: #8A847C; }
+
+  .hero {
+    position: absolute;
+    left: 213px;
+    top: 190px;
+    width: 654px;
+    height: 1342px;
+    transform-origin: 50% 50%;
+    z-index: 2;
+  }
+  .hero iframe {
+    width: 380px;
+    height: 780px;
+    border: 0;
+    display: block;
+    transform: scale(1.72);
+    transform-origin: top left;
+    background: transparent;
+    box-shadow: 0 40px 80px -40px rgba(28, 27, 26, 0.28);
+    border-radius: 26px;
+  }
+  .lockup {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 1570px;
+    text-align: center;
+  }
+  .lockup .bars {
+    display: flex;
+    gap: 7px;
+    justify-content: center;
+    align-items: center;
+    height: 56px;
+    margin-bottom: 26px;
+  }
+  .lockup .bars i {
+    display: block;
+    width: 7px;
+    border-radius: 4px;
+    background: var(--terracotta);
+    transform-origin: 50% 50%;
+  }
+  .lockup .name {
+    font-size: 76px;
+    font-weight: 700;
+    letter-spacing: -2px;
+    line-height: 1;
+    opacity: 0;
+  }
+  .lockup .name em { font-style: normal; color: var(--terracotta); }
+  .lockup .tag {
+    margin-top: 22px;
+    font-size: 30px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: -0.4px;
+    opacity: 0;
+  }
+  .lockup .sub {
+    margin-top: 26px;
+    font-size: 20px;
+    color: #9A948C;
+    letter-spacing: 0.2px;
+    opacity: 0;
+  }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <div class="glow"></div>
+
+  <svg class="band" id="band" viewBox="0 0 1080 320" aria-hidden="true">
+    <path class="noisy" id="noisy" d="" />
+    <path class="clean" id="clean" d="" />
+  </svg>
+
+  <div class="hero" id="hero">
+    <iframe id="app" src="/src/index.html" title="Kriuk"></iframe>
+  </div>
+
+  <div class="lockup" id="lockup">
+    <div class="bars" id="lockBars"></div>
+    <div class="name" id="lockName">kriuk<em>.</em></div>
+    <div class="tag" id="lockTag">Your quiet room is ready.</div>
+    <div class="sub" id="lockSub">Free and open source · Windows 10/11</div>
+  </div>
+</div>
+
+<script>
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
+const seg = (t, a, b) => clamp01((t - a) / (b - a));
+const easeOut = (x) => 1 - Math.pow(1 - x, 3);
+const easeInOut = (x) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
+
+const DURATION = 15;
+const stage = document.getElementById('stage');
+const hero = document.getElementById('hero');
+const frame = document.getElementById('app');
+const noisy = document.getElementById('noisy');
+const clean = document.getElementById('clean');
+const lockName = document.getElementById('lockName');
+const lockTag = document.getElementById('lockTag');
+const lockSub = document.getElementById('lockSub');
+const lockBars = document.getElementById('lockBars');
+
+/* logo bars for the lockup: same 5-bar mark as the app */
+const BAR_H = [26, 40, 56, 40, 26];
+BAR_H.forEach((h, i) => {
+  const b = document.createElement('i');
+  b.style.height = h + 'px';
+  b.style.transform = 'scaleY(0)';
+  b.dataset.i = i;
+  lockBars.appendChild(b);
+});
+const bars = Array.from(lockBars.children);
+
+/* waveform geometry: noisy jitter morphs into a calm line */
+const POINTS = 64;
+function wavePath(amount, phase) {
+  let d = '';
+  for (let i = 0; i <= POINTS; i++) {
+    const x = (1080 / POINTS) * i;
+    const edge = Math.sin((i / POINTS) * Math.PI);
+    const jitter = Math.sin(i * 1.9 + phase) * 46 + Math.sin(i * 4.3 + phase * 1.7) * 22;
+    const y = 160 + (jitter * amount + Math.sin(i * 0.42 + phase) * 18 * amount) * edge;
+    d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1);
+  }
+  return d;
+}
+/* the settled line: one slow sine, no jitter */
+function calmPath(phase) {
+  let d = '';
+  for (let i = 0; i <= POINTS; i++) {
+    const x = (1080 / POINTS) * i;
+    const edge = Math.sin((i / POINTS) * Math.PI);
+    const y = 160 + Math.sin(i * 0.17 + phase) * 34 * edge;
+    d += (i === 0 ? 'M' : 'L') + x.toFixed(1) + ' ' + y.toFixed(1);
+  }
+  return d;
+}
+
+let doc = null;
+let ui = {};
+let ghost = null;
+
+function ready() {
+  doc = frame.contentDocument;
+  if (!doc || !doc.getElementById('panel')) return false;
+  ui = {
+    panel: doc.getElementById('panel'),
+    echoToggle: doc.getElementById('echo-toggle'),
+    echoSub: doc.getElementById('echo-sub'),
+    micTest: doc.getElementById('mic-test'),
+    meterState: doc.getElementById('meter-state'),
+    meterBars: Array.from(doc.querySelectorAll('#meter i')),
+    eq: doc.getElementById('eq-presets'),
+    eqLabel: doc.getElementById('eq-label'),
+    langId: doc.querySelector('#lang button[data-value="id"]'),
+    themeDark: doc.querySelector('#theme button[data-value="dark"]'),
+    check: doc.querySelector('.banner-check svg path'),
+    root: doc.documentElement,
+  };
+  /* the app remembers language and theme, so pin the opening state explicitly */
+  const en = doc.querySelector('#lang button[data-value="en"]');
+  const light = doc.querySelector('#theme button[data-value="light"]');
+  if (en && !en.classList.contains('is-active')) en.click();
+  if (light && !light.classList.contains('is-active')) light.click();
+
+  /* the active-pill ghost lets the equalizer selection slide between options */
+  ghost = doc.createElement('span');
+  ghost.style.cssText = 'position:absolute;pointer-events:none;opacity:0;border-radius:9px;background:var(--elevated,#fff);box-shadow:0 1px 2px rgba(28,27,26,.06);transition:none;';
+  ui.eq.appendChild(ghost);
+  return true;
+}
+
+function eqRects() {
+  const kids = Array.from(ui.eq.children).filter((n) => n.tagName === 'BUTTON');
+  return kids.map((b) => ({ left: b.offsetLeft, width: b.offsetWidth, top: b.offsetTop, height: b.offsetHeight }));
+}
+
+function setTime(t) {
+  if (!doc && !ready()) return;
+
+  /* BEAT 4 — theme and language first: the app's own renderStatus() rewrites
+     the labels we set below, so the switches must happen before them */
+  const dark = t >= 8.6;
+  ui.root.setAttribute('data-theme', dark ? 'dark' : 'light');
+  stage.classList.toggle('is-dark', dark);
+  if (t >= 9.55 && !ui.langId.classList.contains('is-active')) ui.langId.click();
+  else if (t < 9.55 && ui.langId.classList.contains('is-active')) ui.langId.click();
+
+  /* BEAT 1 — the popover arrives */
+  const enter = easeOut(seg(t, 0.1, 0.55));
+  const pulse = t > 0.9 && t < 1.7 ? 1 + 0.12 * Math.sin(seg(t, 0.9, 1.7) * Math.PI) : 1;
+
+  /* BEAT 5 — panel steps back for the lockup */
+  const outro = easeInOut(seg(t, 11.5, 12.4));
+
+  /* camera: push in on the control under discussion, then settle back.
+     zoom about the hero centre plus a compensating pan keeps the target centred. */
+  const HERO_H = 1342;
+  const FOCUS = [
+    { t0: 2.65, t1: 5.35, s: 1.12, p: 0.72 }, // meter card
+    { t0: 5.75, t1: 8.3, s: 1.1, p: 0.55 },   // echo row + equalizer
+  ];
+  let zoom = 1;
+  let pan = 0;
+  for (const f of FOCUS) {
+    const w = easeInOut(seg(t, f.t0, f.t0 + 0.45)) * (1 - easeInOut(seg(t, f.t1 - 0.45, f.t1)));
+    if (w <= 0) continue;
+    zoom = 1 + (f.s - 1) * w;
+    /* pan only 60% of the way: full centring crops the brand header off the top */
+    pan = -(f.p - 0.5) * HERO_H * zoom * w * 0.6;
+    /* never let the panel's top edge land mid-frame: clamp to the frame edge */
+    pan = Math.max(pan, -(190 - (HERO_H / 2) * (zoom - 1)));
+  }
+
+  hero.style.opacity = String(enter * (1 - 0.55 * outro));
+  hero.style.transform =
+    'translateY(' + (24 * (1 - enter) + 40 * outro + pan).toFixed(2) + 'px)' +
+    ' scale(' + (pulse * (1 - 0.08 * outro) * zoom).toFixed(4) + ')';
+
+  /* BEAT 2 — test running */
+  const testing = t >= 2.5 && t < 11.5;
+  ui.micTest.classList.toggle('is-live', testing);
+  ui.micTest.textContent = testing ? (ui.langId.classList.contains('is-active') ? 'Hentikan' : 'Stop') : (ui.langId.classList.contains('is-active') ? 'Tes mic' : 'Test mic');
+  ui.meterState.textContent = testing
+    ? (ui.langId.classList.contains('is-active') ? 'Mendengarkan…' : 'Listening…')
+    : (ui.langId.classList.contains('is-active') ? 'Tidak merekam' : 'Not recording');
+
+  /* the app lights a contiguous run of bars from a level, so do the same */
+  const total = ui.meterBars.length || 12;
+  const level = testing
+    ? 0.32 + 0.62 * Math.abs(Math.sin(t * 1.9) * Math.sin(t * 0.73 + 1.1))
+    : 0;
+  const lit = Math.round(level * total);
+  ui.meterBars.forEach((b, i) => b.classList.toggle('on', i < lit));
+
+  /* banner check draws once the chain is live */
+  const draw = easeInOut(seg(t, 2.6, 3.0));
+  ui.check.style.strokeDasharray = '24';
+  ui.check.style.strokeDashoffset = String(24 * (1 - draw));
+
+  /* noisy waveform settles into a clean line */
+  const settle = easeInOut(seg(t, 2.6, 3.6));
+  noisy.setAttribute('d', wavePath(1.7 * (1 - settle), t * 1.2));
+  clean.setAttribute('d', calmPath(t * 0.9));
+  clean.style.opacity = String(settle);
+
+  /* BEAT 3 — echo cancellation and equalizer */
+  const echoOn = t >= 5.5;
+  ui.echoToggle.classList.toggle('is-on', echoOn);
+  ui.echoToggle.setAttribute('aria-checked', echoOn ? 'true' : 'false');
+  const id = ui.langId.classList.contains('is-active');
+  ui.echoSub.textContent = echoOn ? (id ? 'Gema speaker dihapus' : 'Speaker echo removed') : (id ? 'Mati' : 'Off');
+
+  const eqTo = t >= 6.9;
+  const kids = Array.from(ui.eq.children).filter((n) => n.tagName === 'BUTTON');
+  kids.forEach((b, i) => b.classList.toggle('is-active', i === (eqTo ? 1 : 0)));
+  ui.eqLabel.textContent = id
+    ? ['Netral', 'Jelas', 'Hangat', 'Auto'][eqTo ? 1 : 0]
+    : ['Neutral', 'Clear', 'Warm', 'Auto'][eqTo ? 1 : 0];
+
+  /* ghost pill slides from Neutral to Clear */
+  const rects = eqRects();
+  if (rects.length >= 2) {
+    const k = easeInOut(seg(t, 6.6, 6.95));
+    const a = rects[0];
+    const b = rects[1];
+    ghost.style.top = a.top + 'px';
+    ghost.style.height = a.height + 'px';
+    ghost.style.left = (a.left + (b.left - a.left) * k) + 'px';
+    ghost.style.width = (a.width + (b.width - a.width) * k) + 'px';
+    ghost.style.opacity = String(t > 6.5 && t < 7.1 ? 0.9 * (1 - Math.abs(k - 0.5) * 1.2) : 0);
+  }
+
+  /* frequency curve lifts once Clear is picked */
+  const lift = easeOut(seg(t, 6.9, 7.6));
+
+  /* BEAT 5 — lockup */
+  bars.forEach((b, i) => {
+    const k = easeOut(seg(t, 11.9 + i * 0.05, 12.25 + i * 0.05));
+    b.style.transform = 'scaleY(' + k.toFixed(3) + ')';
+    b.style.opacity = String(k);
+  });
+  const nameIn = easeOut(seg(t, 12.35, 12.75));
+  lockName.style.opacity = String(nameIn);
+  lockName.style.transform = 'translateY(' + (8 * (1 - nameIn)).toFixed(1) + 'px)';
+  const tagIn = easeOut(seg(t, 12.75, 13.15));
+  lockTag.style.opacity = String(tagIn);
+  const subIn = easeOut(seg(t, 13.15, 13.55));
+  lockSub.style.opacity = String(subIn);
+}
+
+window.__setTime = setTime;
+window.__duration = DURATION;
+
+/* live preview: ?play runs the timeline on a loop, ?t=3.2 renders a single frame */
+const params = new URLSearchParams(location.search);
+const single = params.get('t');
+
+function start() {
+  if (params.has('render')) return; /* the frame renderer drives time itself */
+  if (single !== null) {
+    setTime(parseFloat(single));
+    return;
+  }
+  const t0 = performance.now();
+  const tick = (now) => {
+    const t = ((now - t0) / 1000) % DURATION;
+    setTime(t);
+    requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
+}
+
+frame.addEventListener('load', () => {
+  if (!ready()) return;
+  setTime(0);
+  start();
+});
+</script>
+</body>
+</html>

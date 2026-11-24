@@ -382,6 +382,26 @@ function spkLabel() {
   return select.selectedIndex > 0 ? select.value : '';
 }
 
+/* "Speakers (ME6S)" and "Microphone (ME6S)" are one box, so the mic hears the monitor. */
+function endpointBox(name) {
+  const open = (name || '').indexOf('(');
+  const close = (name || '').lastIndexOf(')');
+  return (close > open && open >= 0 ? name.slice(open + 1, close) : name || '').trim().toLowerCase();
+}
+
+function micLabel() {
+  const select = $('#mic-device');
+  return select.selectedIndex > 0 ? select.value : '';
+}
+
+function monitorFeedsMic() {
+  const mic = micLabel();
+  const out = spkLabel();
+  if (!mic || !out || endpointBox(mic) !== endpointBox(out)) return false;
+  // A headset keeps its speaker on your ear, so sharing the box is safe there.
+  return !/headset|headphone|earphone/.test(out.toLowerCase());
+}
+
 bindToggle('#spk-toggle', 'spk', (on) => {
   spkNotice = '';
   // Echo cancellation needs a speaker that does not carry the processed mic.
@@ -390,6 +410,15 @@ bindToggle('#spk-toggle', 'spk', (on) => {
     $('#spk-toggle').classList.remove('is-on');
     $('#spk-toggle').setAttribute('aria-checked', 'false');
     spkNotice = lang === 'id' ? 'Pilih output lain dulu' : 'Pick a different output first';
+    renderStatus();
+    saveChain();
+    return;
+  }
+  if (on && monitorFeedsMic()) {
+    state.spk = false;
+    $('#spk-toggle').classList.remove('is-on');
+    $('#spk-toggle').setAttribute('aria-checked', 'false');
+    spkNotice = lang === 'id' ? 'Mic ada di perangkat ini' : 'The mic is on this device';
     renderStatus();
     saveChain();
     return;
@@ -449,6 +478,15 @@ listen('kriuk://monitor', (event) => {
   $('#spk-toggle').classList.remove('is-on');
   $('#spk-toggle').setAttribute('aria-checked', 'false');
   renderStatus();
+});
+
+listen('kriuk://monitor-error', () => {
+  state.spk = false;
+  spkNotice = lang === 'id' ? 'Mic ada di perangkat ini' : 'The mic is on this device';
+  $('#spk-toggle').classList.remove('is-on');
+  $('#spk-toggle').setAttribute('aria-checked', 'false');
+  renderStatus();
+  saveChain();
 });
 
 /* ---------- activity ---------- */

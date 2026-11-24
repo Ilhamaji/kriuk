@@ -295,6 +295,28 @@ fn same_device(target: Option<&str>, default: Option<&str>) -> bool {
     }
 }
 
+/// Windows names one box twice: "Speakers (ME6S)" and "Microphone (ME6S)". The
+/// bracketed part is the hardware, so a match means the speaker and the mic are
+/// the same physical device.
+fn endpoint_box(name: &str) -> &str {
+    match (name.find('('), name.rfind(')')) {
+        (Some(open), Some(close)) if close > open => name[open + 1..close].trim(),
+        _ => name.trim(),
+    }
+}
+
+fn same_endpoint(a: &str, b: &str) -> bool {
+    let (a, b) = (endpoint_box(a), endpoint_box(b));
+    !a.is_empty() && a.eq_ignore_ascii_case(b)
+}
+
+/// A headset puts the speaker on your ear and the mic at your mouth, so the same
+/// box is safe there. A speakerphone or laptop speaker is not.
+fn plays_in_your_ear(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["headset", "headphone", "earphone"].iter().any(|k| name.contains(k))
+}
+
 fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
     let host = cpal::default_host();
     let device = pick_device(&host, wanted)?;
@@ -364,6 +386,27 @@ fn run_meter(app: &AppHandle, wanted: Option<&str>) -> Result<(), String> {
         if live != reported {
             reported = live;
             let _ = app.emit("kriuk://monitor", live);
+        }
+
+        // Same box for the mic and the monitor: the speaker sits inches from the
+        // capsule, so the chain feeds itself. That loop is acoustic, no canceller
+        // can see it, so refuse the output instead of howling.
+        if live {
+            let mic = device.name().unwrap_or_default();
+            let out = monitor_target
+                .clone()
+                .or_else(|| host.default_output_device().and_then(|d| d.name().ok()));
+            if let Some(out) = out.as_deref() {
+                if same_endpoint(&mic, out)
+                    && !plays_in_your_ear(out)
+                    && MONITOR_ON.swap(false, Ordering::Relaxed)
+                {
+                    let _ = app.emit(
+                        "kriuk://monitor-error",
+                        "the microphone is on this output, so it hears itself",
+                    );
+                }
+            }
         }
 
         // Same device for monitor and reference: the canceller would hear its own
@@ -726,7 +769,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{same_device, wet_mix, DenoiseState, FRAME};
+    use super::{plays_in_your_ear, same_device, same_endpoint, wet_mix, DenoiseState, FRAME};
 
     fn noise(i: usize) -> f32 {
         let mut x = (i as u32).wrapping_mul(747_796_405).wrapping_add(2_891_336_453);
@@ -783,5 +826,20 @@ mod tests {
         assert!(same_device(Some("Speakers (Realtek)"), Some("speakers (realtek)")));
         assert!(!same_device(Some("CABLE Input (VB-Audio)"), Some("Speakers (Realtek)")));
         assert!(!same_device(Some("CABLE Input"), None));
+    }
+
+    /// Names measured on the development laptop: the ME6S is a speakerphone, so
+    /// playing on "Speakers (ME6S)" puts the output inches from "Microphone (ME6S)".
+    #[test]
+    fn a_speaker_and_a_mic_on_one_box_are_the_same_endpoint() {
+        assert!(same_endpoint("Microphone (ME6S)", "Speakers (ME6S)"));
+        assert!(same_endpoint("Microphone (Realtek(R) Audio)", "Speakers (Realtek(R) Audio)"));
+        assert!(!same_endpoint("Microphone (ME6S)", "Speakers (USB Audio Device)"));
+        assert!(!same_endpoint("Microphone (ME6S)", "CABLE Input (VB-Audio Virtual Cable)"));
+        assert!(!same_endpoint("", "Speakers (ME6S)"));
+        // A headset shares a box with its own mic but keeps the speaker on your ear.
+        assert!(same_endpoint("Microphone (USB Audio Device)", "Headset Earphone (USB Audio Device)"));
+        assert!(plays_in_your_ear("Headset Earphone (USB Audio Device)"));
+        assert!(!plays_in_your_ear("Speakers (ME6S)"));
     }
 }

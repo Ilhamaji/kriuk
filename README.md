@@ -36,7 +36,7 @@ that ships inside the binary, and nothing leaves the device.
 | Runs in the tray | The chain keeps running when the panel is hidden or closed; the tray tooltip reads *Kriuk — listening* while it does |
 | Start with Windows | A `HKCU` Run entry that launches the app with `--hidden`, so signing in does not open the popover; the entry is rewritten on every launch, so moving the exe repairs it |
 | Close to tray | Closing the window hides it instead of quitting; **Quit** in the tray menu still exits |
-| Send result to | Plays the processed audio on a chosen output device, including a virtual audio cable |
+| Send result to | Plays the processed audio on a chosen output device, including a virtual audio cable; a speaker on the microphone's own box is refused |
 | Language | English by default, Indonesian available in Settings; the tray menu and tooltip follow the choice |
 | Appearance | Light or dark, follows the system theme on first run |
 
@@ -145,15 +145,20 @@ not stop it.
 the close really did exit. Turn it back on, or use **Quit** in the tray menu when
 you do want to exit.
 
-**Echo cancellation turns itself off when Send result to uses the default speaker.**
-The canceller listens to the default output device, so routing the processed mic
-back into that same device would make it subtract your own voice. Send the result
-to a virtual cable (or any output other than the default) and echo cancellation
-stays on.
+**Send result to refuses an output.** Two outputs are rejected on purpose. One is
+the default speaker while echo cancellation is on: the canceller listens to that
+device, so playing the processed mic there would make it subtract your own voice.
+The other is a speaker that sits on the same box as the microphone — Windows names
+those `Speakers (ME6S)` and `Microphone (ME6S)`, and the speaker is inches from
+the capsule. That loop is acoustic, so no canceller can see it; the toggle shows
+*The mic is on this device* instead of howling. A headset is exempt, because its
+speaker sits on your ear.
 
-**Echo is still there.** Echo cancellation can only subtract what the selected
-output device actually plays; a headset on a different device gives it no
-reference. It also needs a second or two to converge after you start the chain.
+**Echo is still there.** Echo cancellation can only subtract what the reference
+device plays, and the reference is always the default output. A headset on a
+different device gives it nothing to cancel, so monitoring the processed voice
+there comes back through the mic as a hollow, comb-filtered copy. Use headphones
+or a virtual cable for that output.
 
 **SmartScreen blocks the download.** Expected for an unsigned binary: *More info
 → Run anyway*, or build it yourself.
@@ -175,6 +180,9 @@ microphone again on the next start.
   real room, and the loopback reference cannot model a speaker that is not the
   default output device. It also refuses to run while **Send result to** uses
   that same device, because it would cancel the voice instead of the echo.
+- **Send result to** refuses an output that shares a box with the microphone, and
+  cannot tell whether a speaker on another box is close enough to feed back. Use
+  headphones or a virtual cable when the mic is live.
 - Unsigned binary, so expect the SmartScreen prompt on first run.
 
 ## Contributing

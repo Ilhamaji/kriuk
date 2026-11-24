@@ -38,7 +38,13 @@ const BLUR_GRACE: Duration = Duration::from_millis(600);
 /// Denoiser only works at this rate (RNNoise is trained on 48 kHz).
 const RATE: u32 = 48_000;
 const FRAME: usize = 480; // 10 ms, DenoiseState::FRAME_SIZE
-const QUEUE: usize = 9_600; // 200 ms of monitor audio; extra slack absorbs try_lock misses
+const QUEUE: usize = 9_600; // 200 ms of monitor audio
+/// The monitor keeps this much audio in flight. The mic and the speaker run on
+/// two independent clocks, so without a target depth the queue random-walks
+/// into an empty buffer (clicks) or a full one (dropped blocks).
+const MON_TARGET: usize = 1_920; // 40 ms
+/// Deadband around the target; inside it nothing is stretched.
+const MON_DEAD: usize = 240; // 5 ms
 
 static METER_RUNNING: AtomicBool = AtomicBool::new(false);
 /// 0 = light, 1 = balanced, 2 = maximum. Wet mix read by the audio callback.
@@ -427,10 +433,9 @@ fn run_meter(
         if want && (monitor.is_none() || target != monitor_target) {
             monitor = build_monitor(&host, queue.clone(), target.as_deref());
             monitor_target = target;
-            if monitor.is_some() {
-                // Anything left from the previous output would play late.
+            if monitor.is_none() {
+                // build_monitor prefills the queue when it succeeds.
                 queue.lock().unwrap().clear();
-            } else {
                 MONITOR_ON.store(false, Ordering::Relaxed);
             }
         } else if !want && monitor.is_some() {
@@ -499,6 +504,18 @@ fn run_meter(
     Ok(())
 }
 
+/// Converts a mic sample to the scale RNNoise expects. Its inverse FFT has an
+/// unchecked path that is UB on a non-finite spectrum, so anything non-finite
+/// becomes silence and the rest is clamped well below the f32 overflow point.
+fn denoise_input(acc: f32) -> f32 {
+    let v = acc * 32_768.0;
+    if v.is_finite() {
+        v.clamp(-131_072.0, 131_072.0)
+    } else {
+        0.0
+    }
+}
+
 /// Capture → downmix → denoise → wet mix → level + monitor queue.
 /// Everything is allocated up front; the audio callback only writes into it.
 #[allow(clippy::too_many_arguments)]
@@ -548,27 +565,38 @@ where
                 filled = 0;
 
                 if AEC_ON.load(Ordering::Relaxed) {
-                    if let Ok(mut fifo) = reference.try_lock() {
-                        if fifo.len() >= FRAME {
-                            for slot in ref_frame.iter_mut() {
-                                *slot = fifo.pop_front().unwrap_or(0.0);
+                    match reference.try_lock() {
+                        Ok(mut fifo) => {
+                            if fifo.len() >= FRAME {
+                                for slot in ref_frame.iter_mut() {
+                                    *slot = fifo.pop_front().unwrap_or(0.0);
+                                }
+                            } else {
+                                // Underrun: cancel nothing this block rather than guess.
+                                ref_frame.fill(0.0);
+                                fifo.clear();
                             }
-                        } else {
-                            // Underrun: cancel nothing this block rather than guess.
-                            ref_frame.fill(0.0);
-                            fifo.clear();
+                            drop(fifo);
+                            echo.process(&ref_frame, &mut acc);
+                            // RNNoise's FFT overflows to Inf on values far outside the
+                            // +/-1 a mic produces, and its inverse FFT has an unchecked
+                            // path that is UB on the resulting non-finite spectrum. A
+                            // filter that pushes the block past a few units has
+                            // diverged, so clear it and pass silence instead.
+                            if acc.iter().any(|s| !s.is_finite() || s.abs() > 4.0) {
+                                acc.fill(0.0);
+                                echo.reset();
+                            }
                         }
-                        drop(fifo);
-                        echo.process(&ref_frame, &mut acc);
-                    } else {
-                        // Lock contention: skip AEC this block to avoid glitching.
-                        ref_frame.fill(0.0);
+                        // Lock contention: skip AEC this block, never block the
+                        // callback. The filter keeps its weights for next time.
+                        Err(_) => {}
                     }
                 }
 
                 if denoise {
                     for i in 0..FRAME {
-                        scaled[i] = acc[i] * 32_768.0;
+                        scaled[i] = denoise_input(acc[i]);
                     }
                     denoiser.process_frame(&mut clean, &scaled);
                     for i in 0..FRAME {
@@ -595,14 +623,16 @@ where
                 }
 
                 if monitor_on {
-                    if let Ok(mut q) = queue.try_lock() {
-                        if q.len() + FRAME <= QUEUE {
-                            q.extend(scaled.iter().copied());
+                    match queue.try_lock() {
+                        Ok(mut q) => {
+                            if q.len() + FRAME <= QUEUE {
+                                q.extend(scaled.iter().copied());
+                            }
                         }
+                        // A miss drops one block; the monitor repeats its last
+                        // sample instead of stalling the capture callback.
+                        Err(_) => {}
                     }
-                    // Lock contention: drop this block; the monitor sees a gap
-                    // and fills silence, which is better than blocking the
-                    // capture callback.
                 }
             }
 
@@ -653,26 +683,66 @@ fn build_monitor(
         .next()?
         .with_sample_rate(cpal::SampleRate(RATE));
     let channels = supported.channels() as usize;
+    let mut last = 0f32;
+    let fill = queue.clone();
     let stream = device
         .build_output_stream(
             &supported.config(),
             move |data: &mut [f32], _| {
-                if let Ok(mut q) = queue.try_lock() {
-                    for frame in data.chunks_mut(channels) {
-                        let value = q.pop_front().unwrap_or(0.0);
-                        for s in frame {
-                            *s = value;
+                let frames = data.len() / channels;
+                match queue.try_lock() {
+                    Ok(mut q) => {
+                        // Two devices, two clocks: the queue slowly drains or
+                        // grows. Steal or repeat a single sample per callback,
+                        // and only outside the deadband, so the depth stays put
+                        // and the correction is one sample out of hundreds.
+                        let pop = if q.len() > MON_TARGET + MON_DEAD {
+                            frames as i32 + 1
+                        } else if q.len() < MON_TARGET - MON_DEAD {
+                            frames as i32 - 1
+                        } else {
+                            frames as i32
+                        };
+                        let mut taken = 0i32;
+                        for frame in data.chunks_mut(channels) {
+                            if taken < pop {
+                                match q.pop_front() {
+                                    Some(value) => last = value,
+                                    // Underrun: hold the last sample. A zero here
+                                    // is a step to silence and an audible click.
+                                    None => {}
+                                }
+                                taken += 1;
+                            }
+                            for s in frame {
+                                *s = last;
+                            }
+                        }
+                        // Catch-up path consumed one more than it wrote.
+                        if pop > frames as i32 {
+                            let _ = q.pop_front();
                         }
                     }
-                } else {
-                    // Lock contention: output silence this callback.
-                    data.fill(0.0);
+                    // The capture side is mid-write; repeating one buffer of the
+                    // last sample beats a hard gap.
+                    Err(_) => {
+                        for s in data.iter_mut() {
+                            *s = last;
+                        }
+                    }
                 }
             },
             |e| eprintln!("kriuk monitor: {e}"),
             None,
         )
         .ok()?;
+    // Start at the target depth: an empty queue means the first callbacks
+    // underrun while the capture side is still filling.
+    {
+        let mut q = fill.lock().unwrap();
+        q.clear();
+        q.resize(MON_TARGET, 0.0);
+    }
     stream.play().ok()?;
     Some(stream)
 }
@@ -704,6 +774,16 @@ fn spawn_loopback(
 /// default render device: the monitor target carries our own processed voice, so
 /// using it as the reference would cancel the user instead of the echo.
 fn run_loopback(queue: &Arc<Mutex<VecDeque<f32>>>) -> Result<(), String> {
+    // A fresh thread starts with no COM apartment, and every WASAPI call needs
+    // one. Without this the enumerator fails with 0x800401F0 and echo
+    // cancellation silently never runs.
+    let _ = wasapi::initialize_mta();
+    let result = loopback_body(queue);
+    wasapi::deinitialize();
+    result
+}
+
+fn loopback_body(queue: &Arc<Mutex<VecDeque<f32>>>) -> Result<(), String> {
     use wasapi::{DeviceEnumerator, Direction, SampleType, StreamMode, WaveFormat};
 
     let enumerator = DeviceEnumerator::new().map_err(|e| e.to_string())?;
@@ -760,7 +840,15 @@ fn run_loopback(queue: &Arc<Mutex<VecDeque<f32>>>) -> Result<(), String> {
                         bytes[at + 3],
                     ]);
                 }
-                fifo.push_back(mono / channels as f32);
+                // A device that ignores the requested float format yields garbage
+                // here; keep it finite and bounded so a bad reference can never
+                // drive the canceller off the rails.
+                let sample = mono / channels as f32;
+                fifo.push_back(if sample.is_finite() {
+                    sample.clamp(-8.0, 8.0)
+                } else {
+                    0.0
+                });
             }
             while fifo.len() > REF_QUEUE {
                 fifo.pop_front();
@@ -1317,6 +1405,9 @@ fn main() {
     EQ_PRESET.store(state.eq, Ordering::Relaxed);
     LANG_ID.store(state.lang_id, Ordering::Relaxed);
     CLOSE_TO_TRAY.store(state.close_to_tray, Ordering::Relaxed);
+    // Without this the panel shows Echo on after a restart while the canceller
+    // is dead, so the echo the user already switched off comes back.
+    AEC_ON.store(state.aec_on, Ordering::Relaxed);
     *MONITOR_DEVICE.lock().unwrap() = state.spk.clone();
 
     let shared: Shared = Arc::new(Mutex::new(state));
@@ -1379,7 +1470,21 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{plays_in_your_ear, same_device, same_endpoint, wet_mix, DenoiseState, FRAME};
+    use super::{
+        denoise_input, plays_in_your_ear, same_device, same_endpoint, wet_mix, DenoiseState, FRAME,
+    };
+
+    /// The denoiser is fed this value, and its inverse FFT is UB on a non-finite
+    /// spectrum, so no input may reach it as NaN, Inf, or an overflow-sized number.
+    #[test]
+    fn denoise_input_is_always_finite_and_bounded() {
+        assert_eq!(denoise_input(f32::INFINITY), 0.0);
+        assert_eq!(denoise_input(f32::NEG_INFINITY), 0.0);
+        assert_eq!(denoise_input(f32::NAN), 0.0);
+        assert_eq!(denoise_input(1e30), 131_072.0);
+        assert_eq!(denoise_input(-1e30), -131_072.0);
+        assert_eq!(denoise_input(0.5), 16_384.0);
+    }
 
     fn noise(i: usize) -> f32 {
         let mut x = (i as u32).wrapping_mul(747_796_405).wrapping_add(2_891_336_453);

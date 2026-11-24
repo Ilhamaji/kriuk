@@ -56,6 +56,20 @@ impl EchoCanceller {
         }
     }
 
+    /// Drops the learned filter without reallocating: the caller uses this when a
+    /// block comes back out of range and the filter has to start over. Clearing
+    /// in place keeps the audio callback allocation-free.
+    pub fn reset(&mut self) {
+        self.weights.fill(Complex32::default());
+        self.history.fill(Complex32::default());
+        self.prev.fill(0.0);
+        self.current.fill(Complex32::default());
+        self.error.fill(Complex32::default());
+        self.a.fill(Complex32::default());
+        self.b.fill(Complex32::default());
+        self.power = 0.0;
+    }
+
     /// `reference` is what the speaker plays, `mic` is cleaned in place.
     pub fn process(&mut self, reference: &[f32], mic: &mut [f32]) {
         debug_assert_eq!(reference.len(), BLOCK);
@@ -264,6 +278,58 @@ mod tests {
         let reference = [0f32; BLOCK];
         let mut mic = [0f32; BLOCK];
         aec.process(&reference, &mut mic);
+        assert!(mic.iter().all(|s| s.abs() < 1e-6));
+    }
+
+    /// The canceller must stay bounded whatever the input level; an amplitude the
+    /// unit tests never covered is how a diverging filter would reach the denoiser.
+    #[test]
+    fn stays_bounded_across_amplitudes() {
+        for amp in [0.02f32, 0.1, 0.3, 1.0, 3.0] {
+            let mut noise = Noise(3);
+            let mut aec = EchoCanceller::new();
+            let mut line: VecDeque<f32> = VecDeque::from(vec![0.0; 500]);
+            let mut peak = 0f32;
+            for _ in 0..600 {
+                let mut reference = [0f32; BLOCK];
+                for s in reference.iter_mut() {
+                    *s = noise.next() * amp;
+                }
+                let mut mic = [0f32; BLOCK];
+                for i in 0..BLOCK {
+                    let echo = 0.8 * line.pop_front().unwrap();
+                    let local = noise.next() * amp * 0.1;
+                    mic[i] = echo + local;
+                    line.push_back(reference[i]);
+                }
+                aec.process(&reference, &mut mic);
+                for s in mic.iter() {
+                    assert!(s.is_finite(), "amp {amp}: non-finite output");
+                    peak = peak.max(s.abs());
+                }
+            }
+            assert!(peak < 10.0, "amp {amp}: output peaked at {peak}");
+        }
+    }
+
+    /// A reset must give back a clean filter, since that is what the callback
+    /// relies on when a block comes back out of range.
+    #[test]
+    fn reset_clears_the_learned_filter() {
+        let mut noise = Noise(5);
+        let mut aec = EchoCanceller::new();
+        let mut reference = [0f32; BLOCK];
+        for _ in 0..50 {
+            for s in reference.iter_mut() {
+                *s = noise.next() * 0.3;
+            }
+            let mut mic = [0f32; BLOCK];
+            aec.process(&reference, &mut mic);
+        }
+        aec.reset();
+        let silent = [0f32; BLOCK];
+        let mut mic = [0f32; BLOCK];
+        aec.process(&silent, &mut mic);
         assert!(mic.iter().all(|s| s.abs() < 1e-6));
     }
 }

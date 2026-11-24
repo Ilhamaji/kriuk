@@ -11,8 +11,7 @@ and routing to any output device.
 Pure Rust on Tauri v2. One ~6 MB executable, no Electron, no Node at runtime,
 no background service.
 
-<img src="docs/screenshot-light.png" width="300" alt="Kriuk in light theme">
-<img src="docs/screenshot-dark.png" width="300" alt="Kriuk in dark theme">
+<img src="docs/screenshot.png" width="320" alt="Kriuk main window">
 
 ## Features
 

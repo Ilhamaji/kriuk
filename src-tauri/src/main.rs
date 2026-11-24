@@ -38,7 +38,7 @@ const BLUR_GRACE: Duration = Duration::from_millis(600);
 /// Denoiser only works at this rate (RNNoise is trained on 48 kHz).
 const RATE: u32 = 48_000;
 const FRAME: usize = 480; // 10 ms, DenoiseState::FRAME_SIZE
-const QUEUE: usize = 4_800; // 100 ms of monitor audio
+const QUEUE: usize = 9_600; // 200 ms of monitor audio; extra slack absorbs try_lock misses
 
 static METER_RUNNING: AtomicBool = AtomicBool::new(false);
 /// 0 = light, 1 = balanced, 2 = maximum. Wet mix read by the audio callback.
@@ -548,18 +548,22 @@ where
                 filled = 0;
 
                 if AEC_ON.load(Ordering::Relaxed) {
-                    let mut fifo = reference.lock().unwrap();
-                    if fifo.len() >= FRAME {
-                        for slot in ref_frame.iter_mut() {
-                            *slot = fifo.pop_front().unwrap_or(0.0);
+                    if let Ok(mut fifo) = reference.try_lock() {
+                        if fifo.len() >= FRAME {
+                            for slot in ref_frame.iter_mut() {
+                                *slot = fifo.pop_front().unwrap_or(0.0);
+                            }
+                        } else {
+                            // Underrun: cancel nothing this block rather than guess.
+                            ref_frame.fill(0.0);
+                            fifo.clear();
                         }
+                        drop(fifo);
+                        echo.process(&ref_frame, &mut acc);
                     } else {
-                        // Underrun: cancel nothing this block rather than guess.
+                        // Lock contention: skip AEC this block to avoid glitching.
                         ref_frame.fill(0.0);
-                        fifo.clear();
                     }
-                    drop(fifo);
-                    echo.process(&ref_frame, &mut acc);
                 }
 
                 if denoise {
@@ -591,10 +595,14 @@ where
                 }
 
                 if monitor_on {
-                    let mut q = queue.lock().unwrap();
-                    if q.len() + FRAME <= QUEUE {
-                        q.extend(scaled.iter().copied());
+                    if let Ok(mut q) = queue.try_lock() {
+                        if q.len() + FRAME <= QUEUE {
+                            q.extend(scaled.iter().copied());
+                        }
                     }
+                    // Lock contention: drop this block; the monitor sees a gap
+                    // and fills silence, which is better than blocking the
+                    // capture callback.
                 }
             }
 
@@ -649,12 +657,16 @@ fn build_monitor(
         .build_output_stream(
             &supported.config(),
             move |data: &mut [f32], _| {
-                let mut q = queue.lock().unwrap();
-                for frame in data.chunks_mut(channels) {
-                    let value = q.pop_front().unwrap_or(0.0);
-                    for s in frame {
-                        *s = value;
+                if let Ok(mut q) = queue.try_lock() {
+                    for frame in data.chunks_mut(channels) {
+                        let value = q.pop_front().unwrap_or(0.0);
+                        for s in frame {
+                            *s = value;
+                        }
                     }
+                } else {
+                    // Lock contention: output silence this callback.
+                    data.fill(0.0);
                 }
             },
             |e| eprintln!("kriuk monitor: {e}"),
@@ -668,7 +680,7 @@ fn build_monitor(
 /// Speaker audio kept as the echo reference. Deliberately short: the adaptive
 /// filter covers 40 ms of echo path, so a deep buffer would push the reference
 /// past what it can model.
-const REF_QUEUE: usize = 960;
+const REF_QUEUE: usize = 1_920; // 40 ms, 4 AEC partitions; try_lock misses need headroom
 const _: () = assert!(FRAME == aec::BLOCK);
 
 fn spawn_loopback(
@@ -736,23 +748,26 @@ fn run_loopback(queue: &Arc<Mutex<VecDeque<f32>>>) -> Result<(), String> {
             .read_from_device(&mut bytes[..need])
             .map_err(|e| e.to_string())?;
 
-        let mut fifo = queue.lock().unwrap();
-        for frame in 0..read as usize {
-            let mut mono = 0f32;
-            for ch in 0..channels {
-                let at = (frame * channels + ch) * 4;
-                mono += f32::from_le_bytes([
-                    bytes[at],
-                    bytes[at + 1],
-                    bytes[at + 2],
-                    bytes[at + 3],
-                ]);
+        if let Ok(mut fifo) = queue.try_lock() {
+            for frame in 0..read as usize {
+                let mut mono = 0f32;
+                for ch in 0..channels {
+                    let at = (frame * channels + ch) * 4;
+                    mono += f32::from_le_bytes([
+                        bytes[at],
+                        bytes[at + 1],
+                        bytes[at + 2],
+                        bytes[at + 3],
+                    ]);
+                }
+                fifo.push_back(mono / channels as f32);
             }
-            fifo.push_back(mono / channels as f32);
+            while fifo.len() > REF_QUEUE {
+                fifo.pop_front();
+            }
         }
-        while fifo.len() > REF_QUEUE {
-            fifo.pop_front();
-        }
+        // Lock contention: skip this packet; the capture side will see an
+        // underrun and cancel nothing, which is better than blocking.
     }
     let _ = client.stop_stream();
     Ok(())

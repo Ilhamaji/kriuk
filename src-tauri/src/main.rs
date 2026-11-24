@@ -929,6 +929,9 @@ impl Panel {
         }
         window.set_visible(true);
         window.focus_window();
+        // First frame on demand: the device refresh that usually wakes the
+        // panel can finish before it exists, and then nothing would paint.
+        window.request_redraw();
 
         let ctx = egui::Context::default();
         // Fonts are rebuilt at the start of a frame, so they have to be set before
@@ -1299,7 +1302,14 @@ impl ApplicationHandler<UserEvent> for App {
         let mut exit = false;
 
         if let Some(panel) = self.panel.as_mut() {
-            let _ = panel.state.on_window_event(&panel.window, &event);
+            let response = panel.state.on_window_event(&panel.window, &event);
+            // An idle panel schedules no frame, so a click egui just recorded
+            // would wait in its input queue for the next unrelated wake: the
+            // panel looked frozen and the tab never changed. RedrawRequested is
+            // excluded because it is already the frame that paints.
+            if response.repaint && !matches!(&event, WindowEvent::RedrawRequested) {
+                panel.window.request_redraw();
+            }
             match &event {
                 WindowEvent::CloseRequested => {
                     if close_to_tray {

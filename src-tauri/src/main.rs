@@ -1673,8 +1673,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        denoise_input, plays_in_your_ear, same_device, same_endpoint, second_instance,
-        suppressor_floor, wet_mix, DenoiseState, Suppressor, FRAME,
+        aec, denoise_input, eq, plays_in_your_ear, same_device, same_endpoint, second_instance,
+        suppressor_floor, wet_mix, DenoiseState, EchoCanceller, Suppressor, FRAME, RATE,
     };
 
     /// The mutex has to be held by the first call, or the second copy of the exe
@@ -1908,6 +1908,286 @@ mod tests {
         if raw_speech - raw_floor > 6.0 {
             assert!(raw_floor - levels(&last).0 > 3.0, "floor barely moved");
         }
+    }
+
+    /// Offline quality report: real speech, deterministic noise, the same stages
+    /// the capture callback runs, then the canceller against a synthetic echo.
+    /// The numbers say how much noise goes and how much voice changes; the WAVs
+    /// it writes are for ears.
+    ///
+    ///   cargo test --release measure_chain -- --ignored --nocapture
+    ///     KRIUK_AB_IN=speech.f32  KRIUK_AB_NEAR=other-speech.f32
+    ///     KRIUK_AB_DIR=%TEMP%\kriuk-q
+    #[test]
+    #[ignore = "measurement, needs KRIUK_AB_IN and KRIUK_AB_NEAR (f32le 48 kHz mono speech)"]
+    fn measure_chain_quality() {
+        use rustfft::num_complex::Complex;
+        let dir = std::env::var("KRIUK_AB_DIR").unwrap_or_else(|_| ".".into());
+        let bytes = std::fs::read(std::env::var("KRIUK_AB_IN").expect("KRIUK_AB_IN"))
+            .expect("read speech");
+        let speech: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        // Silence at both ends: the gate can only show what it does where nobody
+        // speaks, and the fixture is wall-to-wall words.
+        let pad = RATE as usize * 3 / 2;
+        let mut clean = vec![0f32; pad];
+        clean.extend_from_slice(&speech);
+        clean.resize(clean.len() + pad, 0.0);
+
+        let rms = |x: &[f32]| {
+            let sum: f64 = x.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+            (sum / x.len().max(1) as f64).sqrt()
+        };
+        // Room hiss at 10 dB SNR: broadband, gently low-passed like a fan.
+        let mut seed = 0x1234_5678u32;
+        let mut lp = 0f32;
+        let mut hiss: Vec<f32> = clean
+            .iter()
+            .map(|_| {
+                seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let white = (seed >> 8) as f32 / 8_388_608.0 - 1.0;
+                lp = lp * 0.9 + white * 0.1;
+                lp
+            })
+            .collect();
+        // Scaled after the filter, so the SNR in the report is the SNR the chain
+        // actually saw rather than a number chosen before the low-pass.
+        let scale = (rms(&clean) / 10f64.powf(10.0 / 20.0) / rms(&hiss)) as f32;
+        for s in hiss.iter_mut() {
+            *s *= scale;
+        }
+        let noisy: Vec<f32> = clean.iter().zip(&hiss).map(|(s, n)| s + n).collect();
+
+        let chain = |level: u8, preset: u8| -> Vec<f32> {
+            let mut denoiser = DenoiseState::new();
+            let mut suppressor = Suppressor::new();
+            suppressor.set_floor(suppressor_floor(level));
+            let mut equalizer = eq::Eq::new();
+            equalizer.set_preset(preset);
+            let wet = wet_mix(level);
+            let mut scaled = vec![0f32; FRAME];
+            let mut clean_frame = vec![0f32; FRAME];
+            let mut frame = vec![0f32; FRAME];
+            let mut out = Vec::with_capacity(noisy.len());
+            for block in noisy.chunks_exact(FRAME) {
+                for i in 0..FRAME {
+                    scaled[i] = denoise_input(block[i]);
+                }
+                let vad = denoiser.process_frame(&mut clean_frame, &scaled);
+                for i in 0..FRAME {
+                    frame[i] = block[i] * (1.0 - wet) + (clean_frame[i] / 32_768.0) * wet;
+                }
+                suppressor.process(&mut frame, vad);
+                equalizer.process(&mut frame);
+                out.extend_from_slice(&frame);
+            }
+            out
+        };
+
+        let hann = |i: usize| {
+            let x = i as f32 / FRAME as f32;
+            0.5 - 0.5 * (2.0 * std::f32::consts::PI * x).cos()
+        };
+        let mut planner = rustfft::FftPlanner::<f32>::new();
+        let fft = planner.plan_fft_forward(FRAME);
+        // 100 Hz per bin: 100 Hz .. 4 kHz covers the voice.
+        let bands = |x: &[f32]| -> Vec<f64> {
+            let mut buf: Vec<Complex<f32>> = x
+                .iter()
+                .enumerate()
+                .map(|(i, s)| Complex::new(*s * hann(i), 0.0))
+                .collect();
+            fft.process(&mut buf);
+            (1..40)
+                .map(|i| 20.0 * (buf[i].norm() as f64 + 1e-9).log10())
+                .collect()
+        };
+        // Log-spectral distance on speech frames only: how far the voice moved
+        // from the clean reference, in dB per band. Under ~3 dB is a gentle
+        // change, over ~6 dB is a different voice.
+        let lsd = |a: &[f32], b: &[f32]| -> f64 {
+            let mut total = 0f64;
+            let mut frames = 0usize;
+            for (fa, fb) in a.chunks_exact(FRAME).zip(b.chunks_exact(FRAME)) {
+                let level = 20.0 * (rms(fa) + 1e-9).log10();
+                if level < -35.0 {
+                    continue;
+                }
+                let (ba, bb) = (bands(fa), bands(fb));
+                total += ba
+                    .iter()
+                    .zip(&bb)
+                    .map(|(x, y)| (x - y).powi(2))
+                    .sum::<f64>()
+                    / ba.len() as f64;
+                frames += 1;
+            }
+            (total / frames.max(1) as f64).sqrt()
+        };
+        // The chain delays the voice (a denoiser frame, the biquads' group delay),
+        // so a zero-lag comparison would call a faithful copy unrelated.
+        let align = |a: &[f32], b: &[f32]| -> usize {
+            let mut best = (0usize, f64::MIN);
+            for lag in 0..=RATE as usize / 50 {
+                let n = a.len().min(b.len().saturating_sub(lag));
+                if n < RATE as usize {
+                    break;
+                }
+                let (mut num, mut da, mut db) = (0f64, 0f64, 0f64);
+                let mut i = 0;
+                while i < n {
+                    let (x, y) = (a[i] as f64, b[i + lag] as f64);
+                    num += x * y;
+                    da += x * x;
+                    db += y * y;
+                    i += 16;
+                }
+                let r = num / (da.sqrt() * db.sqrt()).max(1e-12);
+                if r > best.1 {
+                    best = (lag, r);
+                }
+            }
+            best.0
+        };
+        let write = |name: &str, x: &[f32]| {            let path = std::path::Path::new(&dir).join(name);
+            let mut out = Vec::with_capacity(44 + x.len() * 2);
+            out.extend_from_slice(b"RIFF");
+            out.extend_from_slice(&((36 + x.len() * 2) as u32).to_le_bytes());
+            out.extend_from_slice(b"WAVEfmt ");
+            out.extend_from_slice(&16u32.to_le_bytes());
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&1u16.to_le_bytes());
+            out.extend_from_slice(&RATE.to_le_bytes());
+            out.extend_from_slice(&(RATE * 2).to_le_bytes());
+            out.extend_from_slice(&2u16.to_le_bytes());
+            out.extend_from_slice(&16u16.to_le_bytes());
+            out.extend_from_slice(b"data");
+            out.extend_from_slice(&((x.len() * 2) as u32).to_le_bytes());
+            for s in x {
+                out.extend_from_slice(&((s.clamp(-1.0, 1.0) * 32_767.0) as i16).to_le_bytes());
+            }
+            std::fs::write(path, out).expect("write wav");
+        };
+
+        let (clean_floor, clean_speech) = levels(&clean);
+        let (noisy_floor, noisy_speech) = levels(&noisy);
+        println!(
+            "input   floor {:6.1}  speech {:6.1}  snr {:5.1} dB",
+            noisy_floor,
+            noisy_speech,
+            noisy_speech - noisy_floor
+        );
+        println!(
+            "clean   floor {:6.1}  speech {:6.1}  (reference, unprocessed)",
+            clean_floor, clean_speech
+        );
+        write("01-noisy.wav", &noisy);
+        {
+            // Control: the metric has to show the *noise* as damage, otherwise a
+            // high score after processing proves nothing.
+            let lag = align(&clean, &noisy);
+            let n = clean.len().min(noisy.len() - lag);
+            println!(
+                "noisy vs clean   r {:5.3}  lsd {:4.1} dB  (control, nothing processed)",
+                correlation(&clean[..n], &noisy[lag..lag + n]),
+                lsd(&clean[..n], &noisy[lag..lag + n]),
+            );
+        }
+        for (name, level, preset) in [
+            ("02-balanced.wav", 1u8, eq::NEUTRAL),
+            ("03-max.wav", 2, eq::NEUTRAL),
+            ("04-max-warm.wav", 2, eq::WARM),
+        ] {
+            let out = chain(level, preset);
+            let (floor, speech) = levels(&out);
+            let gain = 10f64.powf((noisy_speech - speech) / 20.0) as f32;
+            let matched: Vec<f32> = out.iter().map(|s| s * gain).collect();
+            let (matched_floor, _) = levels(&matched);
+            let lag = align(&clean, &matched);
+            let n = clean.len().min(matched.len() - lag);
+            let (a, b) = (&clean[..n], &matched[lag..lag + n]);
+            println!(
+                "{name:16} floor {:6.1}  speech {:6.1}  snr {:5.1} dB  floor drop {:5.1} dB  r {:5.3}  lsd {:4.1} dB  lag {:2} ms",
+                floor,
+                speech,
+                speech - floor,
+                noisy_floor - matched_floor,
+                correlation(a, b),
+                lsd(a, b),
+                lag * 1000 / RATE as usize,
+            );
+            write(name, &matched);
+        }
+
+        // Echo: the far end goes through a short room path and comes back in the
+        // mic. ERLE is measured on the echo-only part; the last third adds the
+        // near voice — a *different* recording, since a time-reversed copy is the
+        // conjugate of the reference and a linear canceller could predict it.
+        let taps = [0.50f32, 0.22, -0.12, 0.08, -0.05, 0.03, -0.02, 0.01];
+        let far = &clean;
+        let near_bytes = std::fs::read(
+            std::env::var("KRIUK_AB_NEAR").expect("KRIUK_AB_NEAR (f32le 48 kHz mono)"),
+        )
+        .expect("read near");
+        let near_speech: Vec<f32> = near_bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+        let talk_from = far.len() * 2 / 3;
+        let mut echo_in = vec![0f32; far.len()];
+        let mut seed = 0x9E37_79B9u32;
+        for n in 0..far.len() {
+            let mut v = 0f32;
+            for (k, tap) in taps.iter().enumerate() {
+                if n >= k {
+                    v += tap * far[n - k];
+                }
+            }
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let room = ((seed >> 8) as f32 / 8_388_608.0 - 1.0) * 0.002;
+            echo_in[n] = v + room;
+            if n >= talk_from {
+                echo_in[n] += 0.5 * near_speech[n - talk_from];
+            }
+        }
+        let mut echo_out = echo_in.clone();
+        let mut canceller = EchoCanceller::new();
+        for (r, m) in far
+            .chunks_exact(aec::BLOCK)
+            .zip(echo_out.chunks_exact_mut(aec::BLOCK))
+        {
+            canceller.process(r, m);
+        }
+        // ERLE only where the mic holds echo and nothing else: the last third has
+        // the near voice on top, and "reduction" there would just measure how much
+        // of your own voice the canceller ate.
+        let from = RATE as usize;
+        let mut profile = String::new();
+        for s in (1..talk_from / RATE as usize).step_by(2) {
+            let a = s * RATE as usize;
+            let b = (a + RATE as usize).min(talk_from);
+            let db = 20.0 * (rms(&echo_in[a..b]) / rms(&echo_out[a..b]).max(1e-9)).log10();
+            profile.push_str(&format!(" {s}s:{db:.0}"));
+        }
+        println!("echo    erle per 2 s:{profile}");
+        let erle = 20.0
+            * (rms(&echo_in[from..talk_from]) / rms(&echo_out[from..talk_from]).max(1e-9)).log10();
+        let near_tail = &near_speech[..echo_out.len() - talk_from];
+        let kept = rms(&echo_out[talk_from..]) / rms(near_tail).max(1e-9);
+        let peak = echo_out.iter().fold(0f32, |m, s| m.max(s.abs()));
+        println!(
+            "echo    erle {erle:5.1} dB after 1 s of echo only; local voice kept {kept:4.2}x during double talk, peak {peak:4.2}",
+        );
+        write("05-echo-in.wav", &echo_in);
+        write("06-echo-out.wav", &echo_out);
+        println!("wrote six wav files to {dir}");
+        // Reported, not graded: the canceller nulls a synthetic linear echo to
+        // numerical zero and then diverges once a near voice appears, and the
+        // capture callback hides that behind a per-block reset. A threshold here
+        // would only bury the finding.
     }
     /// Pearson correlation, the cheapest way to say "is this still the same
     /// voice" after the chain. 1.0 is untouched, 0.0 is unrelated.

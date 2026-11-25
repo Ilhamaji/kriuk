@@ -1,11 +1,15 @@
-# Builds a release body from the commits between the previous tag and this one.
+# Builds a release body from every commit since the last *published* release.
 # Docs, chores and CI edits are dropped: a README fix is not a release.
 #
-#   ./release.ps1 -Tag v0.3.7 -Out release.md -Sha <sha256> -Repo Ilhamaji/kriuk
+#   ./release.ps1 -Tag v0.3.7 -From v0.3.6 -Out release.md -Sha <sha256> -Repo Ilhamaji/kriuk
+#
+# -From is the last release tag, not the last tag: a build that was tagged but
+# never published is folded into the next release instead of disappearing.
 #
 # Exit codes: 0 notes written, 2 nothing user-facing (skip the release), 1 error.
 param(
   [Parameter(Mandatory = $true)][string]$Tag,
+  [string]$From = '',
   [string]$Out = 'release.md',
   [string]$Sha = '',
   [string]$Repo = ''
@@ -24,8 +28,9 @@ $SECTIONS = [ordered]@{
   revert   = 'Reverted'
 }
 
-$prev = (git describe --tags --abbrev=0 --match 'v*' "$Tag^" 2>$null)
-$range = if ($prev) { "$prev..$Tag" } else { $Tag }
+$base = $From
+if (-not $base) { $base = (git describe --tags --abbrev=0 --match 'v*' "$Tag^" 2>$null) }
+$range = if ($base) { "$base..$Tag" } else { $Tag }
 
 $log = git log $range --no-merges --pretty=format:'%h%x09%s'
 if (-not $log) {
@@ -83,8 +88,8 @@ foreach ($key in $found.Keys) {
 [void]$md.AppendLine('3. Open the panel from the tray icon. Settings persist in `%APPDATA%\Kriuk\settings.json`.')
 [void]$md.AppendLine('')
 if ($Sha) { [void]$md.AppendLine("SHA-256: ``$Sha``"); [void]$md.AppendLine('') }
-if ($Repo -and $prev) {
-  [void]$md.AppendLine("Full changelog: https://github.com/$Repo/compare/$prev...$Tag")
+if ($Repo -and $base) {
+  [void]$md.AppendLine("Full changelog: https://github.com/$Repo/compare/$base...$Tag")
 }
 
 $target = if ([IO.Path]::IsPathRooted($Out)) { $Out } else { Join-Path $PWD $Out }

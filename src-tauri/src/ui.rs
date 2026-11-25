@@ -159,6 +159,7 @@ fn t(id: bool, key: &str) -> &'static str {
             "footer_local" => "Pratinjau lokal",
             "notice_same_box" => "Mic ada di perangkat ini",
             "notice_aec" => "Butuh output berbeda",
+            "notice_aec_error" => "Tidak tersedia",
             _ => "",
         }
     } else {
@@ -216,6 +217,7 @@ fn t(id: bool, key: &str) -> &'static str {
             "footer_local" => "Local preview",
             "notice_same_box" => "The mic is on this device",
             "notice_aec" => "Needs a different output",
+            "notice_aec_error" => "Not available",
             _ => "",
         }
     }
@@ -580,6 +582,7 @@ fn audio(ui: &mut egui::Ui, p: &Pal, st: &mut State, out: &mut Vec<Action>) {
     ui.add_space(4.0);
     let echo_sub = match st.notice {
         Some("aec_same") => tr(id, "notice_aec"),
+        Some("aec_error") => tr(id, "notice_aec_error"),
         _ if st.aec_on => tr(id, "echo_on"),
         _ => tr(id, "off"),
     };

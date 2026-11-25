@@ -47,7 +47,8 @@ const MON_TARGET: usize = 1_920; // 40 ms
 const MON_DEAD: usize = 240; // 5 ms
 
 static METER_RUNNING: AtomicBool = AtomicBool::new(false);
-/// 0 = light, 1 = balanced, 2 = maximum. Wet mix read by the audio callback.
+/// 0 = light, 1 = balanced, 2 = maximum. Wet mix and gate floor, read by the
+/// audio callback.
 static REDUCTION: AtomicU8 = AtomicU8::new(1);
 /// Denoiser on/off, mirrors the Microphone toggle.
 static DENOISE: AtomicBool = AtomicBool::new(true);
@@ -159,6 +160,60 @@ fn wet_mix(level: u8) -> f32 {
         0 => 0.25,
         2 => 1.0,
         _ => 0.6,
+    }
+}
+
+/// How far the gate may pull the residue down: 1.0 is off, 0.1 is -20 dB.
+/// Maximum is already at a full wet mix, so this is the only way it can go
+/// further than the network on its own.
+fn suppressor_floor(level: u8) -> f32 {
+    match level {
+        0 => 1.0,
+        2 => 0.1,
+        _ => 0.35,
+    }
+}
+
+/// Extra suppression after the network. RNNoise leaves roughly 9 dB of hiss, so
+/// the stronger presets fade the leftovers out while the network's own voice
+/// probability says nobody is talking. Opens fast so the first syllable is not
+/// eaten, closes slowly so it does not chatter between words.
+///
+/// shortcut: one gate on the whole band, not per-frequency. Percussive noise
+/// (typing, a fan click) that the network scores as voice gets through; upgrade
+/// to a spectral floor if that ever matters.
+struct Suppressor {
+    gain: f32,
+    floor: f32,
+}
+
+impl Suppressor {
+    const ATTACK: f32 = 0.004; // ~5 ms at 48 kHz
+    const RELEASE: f32 = 0.0002; // ~100 ms
+
+    fn new() -> Self {
+        Self { gain: 1.0, floor: 1.0 }
+    }
+
+    fn set_floor(&mut self, floor: f32) {
+        self.floor = floor;
+    }
+
+    fn process(&mut self, buf: &mut [f32], vad: f32) {
+        if self.floor >= 1.0 {
+            self.gain = 1.0;
+            return;
+        }
+        let target = self.floor + (1.0 - self.floor) * vad.clamp(0.0, 1.0);
+        let k = if target > self.gain {
+            Self::ATTACK
+        } else {
+            Self::RELEASE
+        };
+        for s in buf.iter_mut() {
+            self.gain += (target - self.gain) * k;
+            *s *= self.gain;
+        }
     }
 }
 
@@ -516,7 +571,7 @@ fn denoise_input(acc: f32) -> f32 {
     }
 }
 
-/// Capture → downmix → denoise → wet mix → level + monitor queue.
+/// Capture → downmix → denoise → wet mix → gate → level + monitor queue.
 /// Everything is allocated up front; the audio callback only writes into it.
 #[allow(clippy::too_many_arguments)]
 fn capture<T>(
@@ -534,6 +589,7 @@ where
     f32: FromSample<T>,
 {
     let mut denoiser = DenoiseState::new();
+    let mut suppressor = Suppressor::new();
     let mut echo = EchoCanceller::new();
     let mut equalizer = eq::Eq::new();
     let mut eq_preset = eq::NEUTRAL;
@@ -547,7 +603,8 @@ where
         config,
         move |data: &[T], _| {
             let denoise = DENOISE.load(Ordering::Relaxed);
-            let wet = wet_mix(REDUCTION.load(Ordering::Relaxed));
+            let reduction = REDUCTION.load(Ordering::Relaxed);
+            let wet = wet_mix(reduction);
             let monitor_on = MONITOR_ON.load(Ordering::Relaxed);
             let mut peak = 0f32;
 
@@ -598,10 +655,12 @@ where
                     for i in 0..FRAME {
                         scaled[i] = denoise_input(acc[i]);
                     }
-                    denoiser.process_frame(&mut clean, &scaled);
+                    let vad = denoiser.process_frame(&mut clean, &scaled);
                     for i in 0..FRAME {
                         scaled[i] = acc[i] * (1.0 - wet) + (clean[i] / 32_768.0) * wet;
                     }
+                    suppressor.set_floor(suppressor_floor(reduction));
+                    suppressor.process(&mut scaled, vad);
                 } else {
                     scaled.copy_from_slice(&acc);
                 }
@@ -760,10 +819,13 @@ fn spawn_loopback(
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         if let Err(err) = run_loopback(&queue) {
+            // The switch is cleared, so the row itself has to say why: a banner
+            // would blame the mic for what is a render-side problem.
+            eprintln!("kriuk loopback: {err}");
             AEC_ON.store(false, Ordering::Relaxed);
             let mut st = shared.lock().unwrap();
             st.aec_on = false;
-            st.err = Some(err);
+            st.notice = Some("aec_error");
             drop(st);
             wake(&proxy);
         }
@@ -1174,6 +1236,11 @@ impl App {
                     st.aec_on = on;
                     st.notice = None;
                     AEC_ON.store(on, Ordering::Relaxed);
+                    // The reference is a loopback of the running chain, so the
+                    // switch would do nothing on its own. Arm and start together.
+                    if on && !st.listening {
+                        start = Some(st.mic.clone());
+                    }
                 }
                 ui::Action::Spk(on) => {
                     st.spk_on = on;
@@ -1481,7 +1548,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        denoise_input, plays_in_your_ear, same_device, same_endpoint, wet_mix, DenoiseState, FRAME,
+        denoise_input, plays_in_your_ear, same_device, same_endpoint, suppressor_floor, wet_mix,
+        DenoiseState, Suppressor, FRAME,
     };
 
     /// The denoiser is fed this value, and its inverse FFT is UB on a non-finite
@@ -1507,8 +1575,11 @@ mod tests {
     #[test]
     fn reduction_levels_change_how_much_noise_survives() {
         let mut denoiser = DenoiseState::new();
+        let mut suppressor = Suppressor::new();
+        suppressor.set_floor(suppressor_floor(2));
         let mut input = vec![0f32; FRAME];
         let mut clean = vec![0f32; FRAME];
+        let mut maximum = vec![0f32; FRAME];
         let light_wet = wet_mix(0);
         let maximum_wet = wet_mix(2);
         let mut energy = [0f64; 2];
@@ -1519,16 +1590,19 @@ mod tests {
                 *s = 0.06 * noise(block * FRAME + i);
             }
             let scaled: Vec<f32> = input.iter().map(|s| s * 32_768.0).collect();
-            denoiser.process_frame(&mut clean, &scaled);
+            let vad = denoiser.process_frame(&mut clean, &scaled);
             if block < 40 {
                 continue; // let the model settle before measuring
             }
             for i in 0..FRAME {
                 let wet = clean[i] / 32_768.0;
                 let light = input[i] * (1.0 - light_wet) + wet * light_wet;
-                let maximum = input[i] * (1.0 - maximum_wet) + wet * maximum_wet;
+                maximum[i] = input[i] * (1.0 - maximum_wet) + wet * maximum_wet;
                 energy[0] += (light * light) as f64;
-                energy[1] += (maximum * maximum) as f64;
+            }
+            suppressor.process(&mut maximum, vad);
+            for s in maximum.iter() {
+                energy[1] += (*s * *s) as f64;
             }
             blocks += 1;
         }
@@ -1537,11 +1611,39 @@ mod tests {
         let light = (energy[0] / samples).sqrt();
         let maximum = (energy[1] / samples).sqrt();
         let gap_db = 20.0 * (light / maximum).log10();
-        // RNNoise itself only pulls white noise down by ~9 dB, so that is the ceiling
-        // for any wet-mix preset; real hiss and fans give it more to work with.
+        // RNNoise alone only pulls white noise down by ~9 dB; the gate is what
+        // takes maximum past that, so the two presets must now be far apart.
         assert!(
-            gap_db > 5.0,
+            gap_db > 10.0,
             "light keeps only {gap_db:.1} dB more noise than maximum; the presets are too close"
+        );
+    }
+
+    /// The gate is the stage that makes maximum stronger than the wet mix can:
+    /// silent frames drop, voiced frames pass through untouched.
+    #[test]
+    fn the_gate_closes_on_silence_and_opens_on_voice() {
+        let mut s = Suppressor::new();
+        s.set_floor(suppressor_floor(2));
+        let mut buf = vec![0f32; FRAME];
+        for _ in 0..50 {
+            buf.fill(0.5);
+            s.process(&mut buf, 0.0);
+        }
+        let floor = suppressor_floor(2);
+        assert!(
+            buf[FRAME - 1] < 0.5 * floor * 1.5,
+            "gate stayed open on silence: {}",
+            buf[FRAME - 1]
+        );
+        for _ in 0..50 {
+            buf.fill(0.5);
+            s.process(&mut buf, 1.0);
+        }
+        assert!(
+            (buf[FRAME - 1] - 0.5).abs() < 0.01,
+            "gate ate the voice: {}",
+            buf[FRAME - 1]
         );
     }
 
@@ -1579,5 +1681,118 @@ mod tests {
         assert!(same_endpoint("Microphone (USB Audio Device)", "Headset Earphone (USB Audio Device)"));
         assert!(plays_in_your_ear("Headset Earphone (USB Audio Device)"));
         assert!(!plays_in_your_ear("Speakers (ME6S)"));
+    }
+    /// Level of the quietest and loudest 20 ms frames, in dBFS. The 10th
+    /// percentile is the room floor, the 90th is speech.
+    fn levels(samples: &[f32]) -> (f64, f64) {
+        let mut frames: Vec<f64> = samples
+            .chunks_exact(960)
+            .map(|f| {
+                let sum: f64 = f.iter().map(|s| (*s as f64) * (*s as f64)).sum();
+                let rms = (sum / f.len() as f64).sqrt().max(1e-9);
+                20.0 * rms.log10()
+            })
+            .collect();
+        frames.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let pick = |q: f64| frames[((frames.len() - 1) as f64 * q) as usize];
+        (pick(0.10), pick(0.90))
+    }
+    /// Real A/B on a real recording: run the same chain the capture callback
+    /// runs (denoise, no EQ) over a mono 48 kHz f32le file and report the floor
+    /// and speech levels before and after, plus how much the speech survives.
+    ///
+    ///   cargo test --release real_recording -- --ignored --nocapture
+    ///     KRIUK_AB_IN=mic.f32 KRIUK_AB_OUT=clean.f32
+    #[test]
+    #[ignore = "needs a recording via KRIUK_AB_IN"]
+    fn real_recording_noise_floor_drops() {
+        let input = std::env::var("KRIUK_AB_IN").expect("KRIUK_AB_IN");
+        let output = std::env::var("KRIUK_AB_OUT").unwrap_or_else(|_| "clean.f32".into());
+        let bytes = std::fs::read(&input).expect("read input");
+        let raw: Vec<f32> = bytes
+            .chunks_exact(4)
+            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .collect();
+
+        let (raw_floor, raw_speech) = levels(&raw);
+        println!(
+            "raw    floor {:6.1} dBFS  speech {:6.1} dBFS  range {:5.1} dB",
+            raw_floor,
+            raw_speech,
+            raw_speech - raw_floor
+        );
+
+        let mut last: Vec<f32> = Vec::new();
+        for level in [1u8, 2] {
+            let mut denoiser = DenoiseState::new();
+            let mut suppressor = Suppressor::new();
+            suppressor.set_floor(suppressor_floor(level));
+            let mut scaled = vec![0f32; FRAME];
+            let mut clean = vec![0f32; FRAME];
+            let mut frame = vec![0f32; FRAME];
+            let wet = wet_mix(level);
+            let mut out: Vec<f32> = Vec::with_capacity(raw.len());
+            for block in raw.chunks_exact(FRAME) {
+                for i in 0..FRAME {
+                    scaled[i] = denoise_input(block[i]);
+                }
+                let vad = denoiser.process_frame(&mut clean, &scaled);
+                for i in 0..FRAME {
+                    frame[i] = block[i] * (1.0 - wet) + (clean[i] / 32_768.0) * wet;
+                }
+                suppressor.process(&mut frame, vad);
+                out.extend_from_slice(&frame);
+            }
+
+            // RNNoise hands back a quieter signal; compare at equal speech level
+            // or the floor drop is just the gain change.
+            let (floor, speech) = levels(&out);
+            let gain = 10f64.powf((raw_speech - speech) / 20.0) as f32;
+            for s in out.iter_mut() {
+                *s *= gain;
+            }
+            let (floor_matched, _) = levels(&out);
+            println!(
+                "wet {:.1} floor {:6.1} dBFS  speech {:6.1} dBFS  drop {:5.1} dB  matched drop {:5.1} dB  r {:5.3}",
+                wet,
+                floor,
+                speech,
+                raw_floor - floor,
+                raw_floor - floor_matched,
+                correlation(&raw, &out),
+            );
+            last = out;
+        }
+
+        let mut bytes_out = Vec::with_capacity(last.len() * 4);
+        for s in &last {
+            bytes_out.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(&output, &bytes_out).expect("write output");
+        println!("wrote {output} (max wet, speech level matched to raw)");
+
+        // Only meaningful when the recording has a floor well under the speech.
+        if raw_speech - raw_floor > 6.0 {
+            assert!(raw_floor - levels(&last).0 > 3.0, "floor barely moved");
+        }
+    }
+    /// Pearson correlation, the cheapest way to say "is this still the same
+    /// voice" after the chain. 1.0 is untouched, 0.0 is unrelated.
+    fn correlation(a: &[f32], b: &[f32]) -> f64 {
+        let n = a.len().min(b.len()) as f64;
+        let (mut sa, mut sb) = (0f64, 0f64);
+        for i in 0..a.len().min(b.len()) {
+            sa += a[i] as f64;
+            sb += b[i] as f64;
+        }
+        let (ma, mb) = (sa / n, sb / n);
+        let (mut num, mut da, mut db) = (0f64, 0f64, 0f64);
+        for i in 0..a.len().min(b.len()) {
+            let (x, y) = (a[i] as f64 - ma, b[i] as f64 - mb);
+            num += x * y;
+            da += x * x;
+            db += y * y;
+        }
+        num / (da.sqrt() * db.sqrt()).max(1e-12)
     }
 }

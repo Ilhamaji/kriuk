@@ -107,7 +107,7 @@ impl State {
             outputs: Vec::new(),
             mic: saved.mic,
             spk: saved.spk,
-            spk_on: false,
+            spk_on: saved.spk_on,
             aec_on: saved.aec_on,
             denoise: saved.denoise,
             reduction: saved.reduction.min(2),
@@ -134,6 +134,7 @@ impl State {
             chain: self.listening,
             mic: self.mic.clone(),
             spk: self.spk.clone(),
+            spk_on: self.spk_on,
             aec_on: self.aec_on,
             denoise: self.denoise,
             reduction: self.reduction,
@@ -362,7 +363,9 @@ fn pick_device(host: &cpal::Host, wanted: Option<&str>) -> Result<cpal::Device, 
                 return Ok(found);
             }
         }
-        return Err(format!("input device not found: {name}"));
+        // The remembered mic is gone (unplugged headset, disabled endpoint). Run
+        // on the default rather than refuse the chain; the caller rewrites the
+        // pick to the device it actually opened, so the panel never lies.
     }
     host.default_input_device()
         .ok_or_else(|| "no input device".to_string())
@@ -412,6 +415,16 @@ fn run_meter(
 ) -> Result<(), String> {
     let host = cpal::default_host();
     let device = pick_device(&host, wanted)?;
+    // Record the mic that is really open: a saved device that vanished falls
+    // back to the default above, and the dropdown has to follow.
+    if wanted.is_some() {
+        if let Ok(actual) = device.name() {
+            let mut st = shared.lock().unwrap();
+            if st.mic.as_deref() != Some(actual.as_str()) {
+                st.mic = Some(actual);
+            }
+        }
+    }
     let supported = device.default_input_config().map_err(|e| e.to_string())?;
     if supported.sample_rate().0 != RATE {
         return Err(format!(
@@ -1485,6 +1498,9 @@ fn main() {
     // Without this the panel shows Echo on after a restart while the canceller
     // is dead, so the echo the user already switched off comes back.
     AEC_ON.store(state.aec_on, Ordering::Relaxed);
+    // The monitor is the other half of the chain: restoring the chain without it
+    // leaves Discord reading a cable that carries nothing.
+    MONITOR_ON.store(state.spk_on, Ordering::Relaxed);
     *MONITOR_DEVICE.lock().unwrap() = state.spk.clone();
 
     let shared: Shared = Arc::new(Mutex::new(state));

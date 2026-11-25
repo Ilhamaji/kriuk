@@ -1162,6 +1162,29 @@ fn segmented(
 }
 
 /// A dropdown that keeps the popover's look: one bordered row, a list under it.
+/// One row of a device list, and the padding inside its popup.
+const LIST_ROW: f32 = 30.0;
+const LIST_PAD: f32 = 6.0;
+
+/// Where the device list goes, and how tall it may be. The panel is a fixed
+/// 380x780 window and the popup is drawn outside the layout, so a list that ran
+/// past the bottom edge would sit where clicks never arrive: open upward when
+/// below is short, and cap the height so the rest can scroll.
+fn popup_placement(row: Rect, screen: Rect, count: usize) -> (egui::Pos2, f32) {
+    let want = count as f32 * LIST_ROW + LIST_PAD * 2.0;
+    let below = screen.bottom() - row.bottom() - 4.0;
+    let above = row.top() - screen.top() - 4.0;
+    if want <= below || below >= above {
+        (
+            row.left_bottom() + Vec2::new(0.0, 4.0),
+            below.min(want).max(LIST_ROW + LIST_PAD * 2.0),
+        )
+    } else {
+        let h = want.min(above).max(LIST_ROW + LIST_PAD * 2.0);
+        (egui::pos2(row.left(), row.top() - 4.0 - h), h)
+    }
+}
+
 fn select(
     ui: &mut egui::Ui,
     p: &Pal,
@@ -1199,26 +1222,34 @@ fn select(
 
     let ctx = ui.ctx().clone();
     let mut picked = None;
+    let (pos, max_h) = popup_placement(rect, ctx.screen_rect(), items.len());
     let area = egui::Area::new(Id::new(("select", slot)))
         .order(egui::Order::Foreground)
-        .fixed_pos(rect.left_bottom() + Vec2::new(0.0, 4.0))
+        .fixed_pos(pos)
         .show(&ctx, |ui| {
             egui::Frame::popup(&ctx.style())
                 .fill(p.white)
                 .stroke(Stroke::new(1.0_f32, p.border))
                 .rounding(Rounding::same(10.0))
-                .inner_margin(egui::Margin::same(6.0))
+                .inner_margin(egui::Margin::same(LIST_PAD))
                 .show(ui, |ui| {
                     ui.set_width(rect.width() - 12.0);
-                    for (i, name) in items.iter().enumerate() {
-                        let color = if i == current { p.accent } else { p.ink };
-                        let b = egui::Button::new(egui::RichText::new(name).size(13.0).color(color))
-                            .fill(Color32::TRANSPARENT)
-                            .min_size(Vec2::new(ui.available_width(), 30.0));
-                        if ui.add(b).clicked() {
-                            picked = Some(i);
-                        }
-                    }
+                    egui::ScrollArea::vertical()
+                        .max_height((max_h - LIST_PAD * 2.0).max(LIST_ROW))
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            for (i, name) in items.iter().enumerate() {
+                                let color = if i == current { p.accent } else { p.ink };
+                                let b = egui::Button::new(
+                                    egui::RichText::new(name).size(13.0).color(color),
+                                )
+                                .fill(Color32::TRANSPARENT)
+                                .min_size(Vec2::new(ui.available_width(), LIST_ROW));
+                                if ui.add(b).clicked() {
+                                    picked = Some(i);
+                                }
+                            }
+                        });
                 });
         });
 
@@ -1350,5 +1381,54 @@ mod tests {
         assert_eq!(items.last().map(String::as_str), Some("Mic B"));
         remember(&mut items, None);
         assert_eq!(items.len(), 3);
+    }
+
+    /// A device list longer than the space under the row has to stay inside the
+    /// window, or its last items can never be clicked.
+    #[test]
+    fn a_long_device_list_still_fits_the_window() {
+        let screen = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(380.0, 780.0));
+        // The output row sits low in the panel, with many outputs below it.
+        let row = Rect::from_min_size(egui::pos2(18.0, 600.0), Vec2::new(344.0, 44.0));
+        let (pos, max_h) = popup_placement(row, screen, 12);
+        assert!(pos.y >= screen.top(), "popup starts above the window");
+        assert!(
+            pos.y + max_h <= screen.bottom(),
+            "popup ends below the window: {} > {}",
+            pos.y + max_h,
+            screen.bottom()
+        );
+        assert!(pos.y + max_h <= row.top(), "an upward popup covers its row");
+
+        // A short list with room below still opens downward.
+        let (pos, max_h) = popup_placement(row, screen, 2);
+        assert!(pos.y >= row.bottom());
+        assert!((max_h - (2.0 * LIST_ROW + LIST_PAD * 2.0)).abs() < 0.01);
+    }
+
+    /// Drawing the open list is the part a geometry test cannot cover: a scroll
+    /// area inside a fixed-size Area has to lay out without panicking.
+    #[test]
+    fn the_open_device_list_draws() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        let mut st = crate::State::from_saved(crate::settings::Saved::default(), false);
+        st.open = Some(0);
+        let p = pal(false);
+        let items: Vec<String> = (0..14).map(|i| format!("Device {i}")).collect();
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_max(
+                egui::pos2(0.0, 0.0),
+                egui::pos2(380.0, 780.0),
+            )),
+            ..Default::default()
+        };
+        let out = ctx.run(input, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                select(ui, &p, &mut st, 0, &items, 1);
+            });
+        });
+        assert!(!out.shapes.is_empty());
+        assert_eq!(st.open, Some(0), "a popup nobody clicked stays open");
     }
 }

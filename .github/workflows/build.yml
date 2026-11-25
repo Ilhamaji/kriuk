@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Tag to publish (empty = latest tag)
+        description: Tag to publish (empty = build only, nothing published)
         required: false
         type: string
 
@@ -40,12 +40,10 @@ jobs:
 
       - name: Check out the tag to publish
         id: target
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
         shell: pwsh
         run: |
           $tag = '${{ inputs.tag }}'.Trim()
-          if (-not $tag) { $tag = (git describe --tags --abbrev=0 --match 'v*') }
-          if (-not $tag) { throw 'no tag found: create one before publishing' }
           git rev-parse --verify "$tag^{commit}" | Out-Null
           git checkout --force $tag
           "tag=$tag" >> $env:GITHUB_OUTPUT
@@ -78,21 +76,26 @@ jobs:
       # being lost. Docs and chores are dropped.
       - name: Release notes
         id: notes
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ steps.target.outputs.tag }}'
           $from = gh release list --limit 1 --json tagName --jq '.[0].tagName'
-          if ($from -eq $tag) { throw "$tag is already published" }
+          # re-running a tag that is already out is a no-op, not a failure
+          if ($from -eq $tag) {
+            "::warning::$tag is already published. Nothing to do."
+            'skip=true' >> $env:GITHUB_OUTPUT
+            exit 0
+          }
           $sha = (Get-FileHash dist/Kriuk.exe -Algorithm SHA256).Hash.ToLower()
           ./.github/release.ps1 -Tag $tag -From $from -Out release.md -Sha $sha -Repo $env:GITHUB_REPOSITORY
           if ($LASTEXITCODE -eq 2) { 'skip=true' >> $env:GITHUB_OUTPUT }
           elseif ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish
-        if: github.event_name == 'workflow_dispatch' && steps.notes.outputs.skip != 'true'
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != '' && steps.notes.outputs.skip != 'true'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -102,5 +105,5 @@ jobs:
           gh release create $tag dist/Kriuk.exe --title $title --notes-file release.md
 
       - name: Skip empty release
-        if: github.event_name == 'workflow_dispatch' && steps.notes.outputs.skip == 'true'
-        run: echo "::warning::No user-facing commits since the last release. Nothing published."
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != '' && steps.notes.outputs.skip == 'true'
+        run: echo "::warning::Nothing published for this tag."

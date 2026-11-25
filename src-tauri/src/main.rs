@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,6 +35,71 @@ use winit::window::{Window, WindowId, WindowLevel};
 const GAP: i32 = 10;
 /// Blur right after showing is Windows handing focus back; ignore it.
 const BLUR_GRACE: Duration = Duration::from_millis(600);
+
+/// A second copy would add a second tray icon and fight the first over
+/// settings.json and the microphone. A named mutex is the cross-process flag;
+/// the handle is leaked on purpose so it lives exactly as long as the process.
+fn second_instance() -> bool {
+    use windows_sys::Win32::Foundation::ERROR_ALREADY_EXISTS;
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    let name: Vec<u16> = "Local\\Kriuk.SingleInstance\0".encode_utf16().collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+    if handle.is_null() {
+        return false;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(ERROR_ALREADY_EXISTS as i32)
+}
+
+/// Launching the exe again should look like "show me Kriuk", not "nothing".
+/// The first copy waits on this named event, so it works even when the panel
+/// was never opened and there is no window for the newcomer to find.
+fn wake_running_panel() {
+    use windows_sys::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SetForegroundWindow, ShowWindow, SW_SHOW,
+    };
+    let wake: Vec<u16> = "Local\\Kriuk.Wake\0".encode_utf16().collect();
+    let title: Vec<u16> = "Kriuk\0".encode_utf16().collect();
+    unsafe {
+        let ev = OpenEventW(EVENT_MODIFY_STATE, 0, wake.as_ptr());
+        if !ev.is_null() {
+            SetEvent(ev);
+        }
+        // This process still holds the foreground rights the user just gave it,
+        // and the panel hides as soon as it loses focus. Wait for the window the
+        // other copy is building, then hand it the foreground.
+        for _ in 0..30 {
+            std::thread::sleep(Duration::from_millis(50));
+            let hwnd = FindWindowW(std::ptr::null(), title.as_ptr());
+            if !hwnd.is_null() {
+                ShowWindow(hwnd, SW_SHOW);
+                SetForegroundWindow(hwnd);
+                break;
+            }
+        }
+    }
+}
+
+fn watch_for_wake(proxy: EventLoopProxy<UserEvent>) {
+    use windows_sys::Win32::System::Threading::{
+        CreateEventW, WaitForSingleObject, INFINITE,
+    };
+    let name: Vec<u16> = "Local\\Kriuk.Wake\0".encode_utf16().collect();
+    let ev = unsafe { CreateEventW(std::ptr::null(), 0, 0, name.as_ptr()) };
+    if ev.is_null() {
+        return;
+    }
+    let ev = ev as isize;
+    std::thread::spawn(move || loop {
+        // Auto-reset: every SetEvent wakes exactly one wait, so repeated
+        // launches queue one "open" each.
+        if unsafe { WaitForSingleObject(ev as _, INFINITE) } != 0 {
+            return;
+        }
+        let _ = proxy.send_event(UserEvent::Menu("open".into()));
+    });
+}
+
 /// Denoiser only works at this rate (RNNoise is trained on 48 kHz).
 const RATE: u32 = 48_000;
 const FRAME: usize = 480; // 10 ms, DenoiseState::FRAME_SIZE
@@ -47,6 +112,9 @@ const MON_TARGET: usize = 1_920; // 40 ms
 const MON_DEAD: usize = 240; // 5 ms
 
 static METER_RUNNING: AtomicBool = AtomicBool::new(false);
+/// Bumped by every start so a thread that is being replaced cannot tear down the
+/// chain that replaced it.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
 /// 0 = light, 1 = balanced, 2 = maximum. Wet mix and gate floor, read by the
 /// audio callback.
 static REDUCTION: AtomicU8 = AtomicU8::new(1);
@@ -273,6 +341,7 @@ fn start_meter(shared: Shared, proxy: EventLoopProxy<UserEvent>, device: Option<
     if METER_RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
+    let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     {
         let mut st = shared.lock().unwrap();
         st.listening = true;
@@ -286,6 +355,11 @@ fn start_meter(shared: Shared, proxy: EventLoopProxy<UserEvent>, device: Option<
             let mut st = shared.lock().unwrap();
             st.err = Some(err);
         }
+        // A replaced chain has already cleared the flags; tearing down here would
+        // switch off the chain that took its place.
+        if GENERATION.load(Ordering::SeqCst) != generation {
+            return;
+        }
         MONITOR_ON.store(false, Ordering::Relaxed);
         METER_RUNNING.store(false, Ordering::SeqCst);
         {
@@ -296,6 +370,13 @@ fn start_meter(shared: Shared, proxy: EventLoopProxy<UserEvent>, device: Option<
         }
         wake(&proxy);
     });
+}
+
+/// Switching microphones while the chain runs: the old stream has to go before
+/// the new device can be opened, and its teardown must not touch the new chain.
+fn restart_meter(shared: Shared, proxy: EventLoopProxy<UserEvent>, device: Option<String>) {
+    METER_RUNNING.store(false, Ordering::SeqCst);
+    start_meter(shared, proxy, device);
 }
 
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
@@ -530,10 +611,15 @@ fn run_meter(
                     && !plays_in_your_ear(out)
                     && MONITOR_ON.swap(false, Ordering::Relaxed)
                 {
-                    let mut st = shared.lock().unwrap();
-                    st.notice = Some("same_box");
-                    st.spk_on = false;
-                    drop(st);
+                    let saved = {
+                        let mut st = shared.lock().unwrap();
+                        st.notice = Some("same_box");
+                        st.spk_on = false;
+                        st.saved()
+                    };
+                    // Written now, not on the next unrelated change: a switch the
+                    // app turned off must not reappear as on in the file.
+                    settings::save(&saved);
                     wake(&proxy);
                 }
             }
@@ -543,10 +629,13 @@ fn run_meter(
         // output, so refuse the pair instead of eating the voice.
         if live && monitor_is_reference(&host, monitor_target.as_deref()) {
             if AEC_ON.swap(false, Ordering::Relaxed) {
-                let mut st = shared.lock().unwrap();
-                st.notice = Some("aec_same");
-                st.aec_on = false;
-                drop(st);
+                let saved = {
+                    let mut st = shared.lock().unwrap();
+                    st.notice = Some("aec_same");
+                    st.aec_on = false;
+                    st.saved()
+                };
+                settings::save(&saved);
                 wake(&proxy);
             }
         }
@@ -836,10 +925,13 @@ fn spawn_loopback(
             // would blame the mic for what is a render-side problem.
             eprintln!("kriuk loopback: {err}");
             AEC_ON.store(false, Ordering::Relaxed);
-            let mut st = shared.lock().unwrap();
-            st.aec_on = false;
-            st.notice = Some("aec_error");
-            drop(st);
+            let saved = {
+                let mut st = shared.lock().unwrap();
+                st.aec_on = false;
+                st.notice = Some("aec_error");
+                st.saved()
+            };
+            settings::save(&saved);
             wake(&proxy);
         }
     })
@@ -1215,6 +1307,7 @@ impl App {
         let mut write = true;
         let mut saved = None;
         let mut start: Option<Option<String>> = None;
+        let mut restart: Option<Option<String>> = None;
         {
             let mut st = self.shared.lock().unwrap();
             match action {
@@ -1266,11 +1359,19 @@ impl App {
                     }
                 }
                 ui::Action::Mic(device) => {
-                    st.mic = device;
+                    st.mic = device.clone();
+                    // A refusal about the old device says nothing about the new one.
+                    st.notice = None;
+                    // The running chain still holds the old device open, so the
+                    // pick would not take effect until the next Start.
+                    if st.listening {
+                        restart = Some(device);
+                    }
                 }
                 ui::Action::SpkDevice(device) => {
                     *MONITOR_DEVICE.lock().unwrap() = device.clone();
                     st.spk = device;
+                    st.notice = None;
                 }
                 ui::Action::TestToggle => {
                     if st.listening {
@@ -1315,6 +1416,9 @@ impl App {
         }
         if let Some(device) = start {
             start_meter(self.shared.clone(), self.proxy.clone(), device);
+        }
+        if let Some(device) = restart {
+            restart_meter(self.shared.clone(), self.proxy.clone(), device);
         }
         if hide {
             self.hide_panel();
@@ -1482,6 +1586,10 @@ impl App {
 }
 
 fn main() {
+    if second_instance() {
+        wake_running_panel();
+        return;
+    }
     let saved = settings::load();
     let follow_system_theme = saved.dark.is_none();
     let dark = saved.dark.unwrap_or(false);
@@ -1513,6 +1621,7 @@ fn main() {
         }
     };
     let proxy = event_loop.create_proxy();
+    watch_for_wake(proxy.clone());
 
     {
         let tray_proxy = proxy.clone();
@@ -1564,9 +1673,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::{
-        denoise_input, plays_in_your_ear, same_device, same_endpoint, suppressor_floor, wet_mix,
-        DenoiseState, Suppressor, FRAME,
+        denoise_input, plays_in_your_ear, same_device, same_endpoint, second_instance,
+        suppressor_floor, wet_mix, DenoiseState, Suppressor, FRAME,
     };
+
+    /// The mutex has to be held by the first call, or the second copy of the exe
+    /// would start a second tray icon and a second chain.
+    #[test]
+    fn the_single_instance_flag_latches() {
+        assert!(!second_instance(), "the first call owns the mutex");
+        assert!(second_instance(), "a second launch sees it taken");
+    }
 
     /// The denoiser is fed this value, and its inverse FFT is UB on a non-finite
     /// spectrum, so no input may reach it as NaN, Inf, or an overflow-sized number.
